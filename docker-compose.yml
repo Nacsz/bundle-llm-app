@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    container_name: llm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: llm_memory
+      POSTGRES_USER: llm_user
+      POSTGRES_PASSWORD: llm_password
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # 초기 스키마 만들 스크립트 있으면 여기에 마운트해도 됨:
+      # - ./backend/db/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: llm-backend
+    # 로컬용 .env(docker 전용) 쓰고 싶으면:
+    # env_file:
+    #   - ./backend/.env.docker
+    environment:
+      # db.py에서 쓰는 DATABASE_URL (중요!)
+      DATABASE_URL: postgresql+psycopg2://llm_user:llm_password@db:5432/llm_memory
+
+      # LLM 키 (루트 .env에서 가져오도록 구성)
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # 필요하면 추가
+      APP_ENV: development
+      LOG_LEVEL: debug
+    volumes:
+      - ./backend:/app      # 코드 핫리로드 (개발용)
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: llm-frontend
+    env_file:
+      - ./frontend/.env.local   # Next.js 기본 개발용 env
+    environment:
+      # 브라우저에서 백엔드를 호출할 주소
+      # 프론트 코드에서 process.env.NEXT_PUBLIC_API_BASE_URL 사용
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000"
+    volumes:
+      - ./frontend:/app         # 코드 수정 → 바로 반영
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+volumes:
+  db_data:
+
+networks:
+  app-network:
+    driver: bridge
