@@ -22,10 +22,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      network: host
     container_name: llm-backend
     # 로컬용 .env(docker 전용) 쓰고 싶으면:
     # env_file:
-    #   - ./backend/.env.docker
+    #   - .env.docker
     environment:
       # db.py에서 쓰는 DATABASE_URL (중요!)
       DATABASE_URL: postgresql+psycopg2://llm_user:llm_password@db:5432/llm_memory
@@ -34,8 +35,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
 
       # 필요하면 추가
-      APP_ENV: development
-      LOG_LEVEL: debug
+      APP_ENV: ${APP_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
     volumes:
       - ./backend:/app      # 코드 핫리로드 (개발용)
     ports:
@@ -50,17 +51,16 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: llm-frontend
-    env_file:
-      - ./frontend/.env.local   # Next.js 기본 개발용 env
+    # env_file: ./frontend/.env.local   # Next.js 기본 개발용 env
     environment:
       # 브라우저에서 백엔드를 호출할 주소
       # 프론트 코드에서 process.env.NEXT_PUBLIC_API_BASE_URL 사용
-      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000"
+      NEXT_PUBLIC_API_BASE_URL: "http://192.168.0.20:8000"
     volumes:
       - ./frontend:/app         # 코드 수정 → 바로 반영
       - /app/node_modules
     ports:
-      - "3000:3000"
+      - "80:3000"
     depends_on:
       - backend
     networks:

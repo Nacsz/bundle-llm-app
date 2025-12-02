@@ -12,8 +12,21 @@ import {
   fetchBundles,
   saveMemoryToBundle,
   fetchMemoriesForBundle,
-  MOCK_USER_ID,
 } from '@/lib/api';
+function genId() {
+  // 브라우저에 crypto.randomUUID 있으면 그거 사용
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    // @ts-ignore
+    return crypto.randomUUID();
+  }
+  // 없으면 타임스탬프 + 랜덤 문자열로 대체
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+const MOCK_USER_ID =
+  process.env.NEXT_PUBLIC_MOCK_USER_ID ??
+  '11111111-1111-1111-1111-111111111111';
+
+import { API_BASE } from '@/lib/api';
 
 export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -96,7 +109,7 @@ export default function HomePage() {
     if (!text.trim()) return;
 
     const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: genId(),
       role: 'user',
       content: text,
     };
@@ -114,11 +127,11 @@ export default function HomePage() {
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'assistant',
-        content: res.answer,
+        content: res.reply,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
-      setLastMemoryContext(res.memory_context);
+      setLastMemoryContext(null); //res.memory_context
     } catch (e) {
       console.error(e);
     } finally {

@@ -1,14 +1,15 @@
-// components/ChatWindow.tsx
+
+
 'use client';
 
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { useState, FormEvent } from 'react';
 import type { ChatMessage } from '@/lib/types';
 
-type Props = {
+type ChatWindowProps = {
   messages: ChatMessage[];
   onSendMessage: (text: string) => Promise<void> | void;
-  isSending?: boolean;
-  memoryContext?: string; // 디버그용 memory_context 표시
+  isSending: boolean;
+  memoryContext?: string;
 };
 
 export function ChatWindow({
@@ -16,18 +17,14 @@ export function ChatWindow({
   onSendMessage,
   isSending,
   memoryContext,
-}: Props) {
+}: ChatWindowProps) {
   const [input, setInput] = useState('');
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
+
     setInput('');
     await onSendMessage(text);
   }
@@ -42,40 +39,36 @@ export function ChatWindow({
         </div>
       )}
 
-      {/* 메시지 영역 */}
+      {/* 채팅 메시지 영역 */}
       <div className="flex-1 overflow-auto p-4 space-y-3 bg-gray-50">
         {messages.map((m) => (
           <div
             key={m.id}
-            className={`max-w-xl p-2 rounded text-sm ${
+            className={`max-w-xl rounded px-3 py-2 text-sm ${
               m.role === 'user'
-                ? 'bg-blue-100 self-end'
-                : 'bg-white border self-start'
+                ? 'bg-blue-500 text-white ml-auto'
+                : 'bg-white border border-gray-200'
             }`}
           >
-            <div className="text-[11px] text-gray-500 mb-1">
-              {m.role === 'user' ? 'You' : 'Assistant'}
-            </div>
-            <div className="whitespace-pre-wrap">{m.content}</div>
+            {m.content}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
 
-      {/* 입력 영역 */}
+      {/* 입력 폼 */}
       <form
         onSubmit={handleSubmit}
         className="border-t border-gray-200 p-3 flex gap-2"
       >
         <textarea
           className="flex-1 border rounded px-2 py-1 text-sm resize-none h-16"
+          placeholder="메시지를 입력하세요..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="메시지를 입력하세요..."
         />
         <button
           type="submit"
-          className="px-3 py-2 text-sm border rounded self-end"
+          className="px-3 py-2 text-sm border rounded self-end disabled:opacity-50"
           disabled={isSending}
         >
           {isSending ? '전송 중...' : '전송'}
@@ -84,4 +77,3 @@ export function ChatWindow({
     </div>
   );
 }
-
