@@ -13,20 +13,19 @@ import {
   saveMemoryToBundle,
   fetchMemoriesForBundle,
 } from '@/lib/api';
+
+// 안전한 ID 생성기
 function genId() {
-  // 브라우저에 crypto.randomUUID 있으면 그거 사용
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     // @ts-ignore
     return crypto.randomUUID();
   }
-  // 없으면 타임스탬프 + 랜덤 문자열로 대체
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
 const MOCK_USER_ID =
   process.env.NEXT_PUBLIC_MOCK_USER_ID ??
   '11111111-1111-1111-1111-111111111111';
-
-import { API_BASE } from '@/lib/api';
 
 export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -36,7 +35,7 @@ export default function HomePage() {
   const [selectedBundleIds, setSelectedBundleIds] = useState<string[]>([]);
 
   const [lastMemoryContext, setLastMemoryContext] = useState<string | null>(
-    null
+    null,
   );
   const [showMemoryContext, setShowMemoryContext] = useState(false);
 
@@ -55,7 +54,7 @@ export default function HomePage() {
         role: m.role,
         content: m.content,
       })),
-    [messages]
+    [messages],
   );
 
   // 1) 번들 목록 로딩
@@ -65,12 +64,11 @@ export default function HomePage() {
         const data = await fetchBundles(MOCK_USER_ID);
         setBundles(data);
 
-        // 번들이 하나라도 있으면 첫 번들을 active로
         if (data.length > 0) {
           setActiveBundleId(data[0].id);
         }
       } catch (e) {
-        console.error(e);
+        console.error('[HomePage] fetchBundles error:', e);
       }
     })();
   }, []);
@@ -88,7 +86,7 @@ export default function HomePage() {
         const data = await fetchMemoriesForBundle(activeBundleId);
         setMemories(data);
       } catch (e) {
-        console.error(e);
+        console.error('[HomePage] fetchMemoriesForBundle error:', e);
         setMemories([]);
       } finally {
         setIsLoadingMemories(false);
@@ -99,7 +97,7 @@ export default function HomePage() {
   // 번들 체크 + active 번들 변경
   function handleToggleBundle(id: string) {
     setSelectedBundleIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
     setActiveBundleId(id);
   }
@@ -117,23 +115,56 @@ export default function HomePage() {
     setIsSending(true);
 
     try {
-      const res = await sendChat({
+      console.log('[handleSendMessage] request payload =', {
+        userId: MOCK_USER_ID,
+        message: text,
+        selectedBundleIds,
+        historyForApi,
+      });
+
+      const res: any = await sendChat({
         userId: MOCK_USER_ID,
         message: text,
         selectedBundleIds,
         history: historyForApi,
       });
 
+      console.log('[handleSendMessage] /chat response =', res);
+
+      // 여러 케이스를 대비해서 reply 텍스트 추출
+      let replyText = '';
+
+      if (typeof res === 'string') {
+        replyText = res;
+      } else if (res) {
+        replyText =
+          res.reply ??
+          res.answer ??
+          res.message ??
+          res.content ??
+          '';
+      }
+
+      if (!replyText) {
+        console.warn(
+          '[handleSendMessage] replyText가 비어있음. 응답 구조를 확인하세요.',
+          res,
+        );
+        replyText = '(LLM 응답이 비어 있습니다. 서버 응답 구조를 확인하세요.)';
+      }
+
       const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
+        id: genId(),
         role: 'assistant',
-        content: res.reply,
+        content: replyText,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
-      setLastMemoryContext(null); //res.memory_context
+      setLastMemoryContext(
+        res && typeof res === 'object' ? res.memory_context ?? null : null,
+      );
     } catch (e) {
-      console.error(e);
+      console.error('[handleSendMessage] error:', e);
     } finally {
       setIsSending(false);
     }
@@ -156,19 +187,16 @@ export default function HomePage() {
 
       setTextToSave('');
 
-      // 방금 저장한 번들이 지금 active라면, 메모 리스트 갱신
       if (bundleId === activeBundleId) {
         try {
           const data = await fetchMemoriesForBundle(bundleId);
           setMemories(data);
         } catch (e) {
-          console.error(e);
+          console.error('[handleSaveMemory] refresh memories error:', e);
         }
       }
-      // TODO: 성공 토스트 추가 가능
     } catch (e) {
-      console.error(e);
-      // TODO: 에러 토스트 추가 가능
+      console.error('[handleSaveMemory] error:', e);
     }
   }
 
