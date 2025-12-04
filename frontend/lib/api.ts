@@ -264,3 +264,31 @@ export async function saveMemoryToBundle(opts: {
   }
   return res.json();
 }
+// -------------------
+// 5) 번들 생성
+//    POST /bundles/{bundle_id}/memories
+// -------------------
+export async function createBundle(params: {
+  userId: string;
+  name: string;
+  description?: string;
+}) {
+  const res = await fetch(`${API_BASE}/bundles/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: params.userId,
+      name: params.name,
+      description: params.description ?? "",
+      color: "#4F46E5",
+      icon: "💡",
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("[createBundle] failed", res.status);
+    throw new Error("Failed to create bundle");
+  }
+
+  return (await res.json()) as import("./types").Bundle;
+}

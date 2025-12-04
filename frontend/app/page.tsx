@@ -12,6 +12,7 @@ import {
   fetchBundles,
   saveMemoryToBundle,
   fetchMemoriesForBundle,
+  createBundle,
 } from '@/lib/api';
 
 // 안전한 ID 생성기
@@ -199,6 +200,25 @@ export default function HomePage() {
       console.error('[handleSaveMemory] error:', e);
     }
   }
+    // 새 번들 생성
+  async function handleCreateBundle(name: string) {
+    try {
+      const created = await createBundle({
+        userId: MOCK_USER_ID,
+        name,
+      });
+
+      // 새 번들을 리스트 맨 앞에 추가
+      setBundles((prev) => [created, ...prev]);
+
+      // 방금 만든 번들을 선택/활성화
+      setSelectedBundleIds((prev) => [...prev, created.id]);
+      setActiveBundleId(created.id);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
 
   return (
     <div className="flex h-screen">
@@ -209,6 +229,7 @@ export default function HomePage() {
           bundles={bundles}
           selectedIds={selectedBundleIds}
           onToggleSelect={handleToggleBundle}
+          onCreateBundle={handleCreateBundle}
         />
       </aside>
 
