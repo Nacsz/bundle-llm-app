@@ -6,8 +6,8 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from openai import OpenAI
+from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.models.bundle import Bundle
@@ -117,15 +117,6 @@ def create_bundle(
     """
     새 번들 생성.
     프론트: POST /bundles/
-    body 예시:
-      {
-        "user_id": "1111-...",
-        "name": "새 번들 이름",
-        "description": "",
-        "color": "#4F46E5",
-        "icon": "�",
-        "parent_id": null
-      }
     """
     logger.info(
         "[create_bundle] user_id=%s name=%s",
@@ -160,9 +151,6 @@ def list_memories_for_bundle(
     ❗ 여기서는 ORM 객체를 그대로 리턴하지 않고,
        우리가 직접 dict/스키마로 변환해서 metadata 문제를 우회한다.
     """
-    import logging
-
-    logger = logging.getLogger("app.bundles")
     logger.info("[list_memories_for_bundle] bundle_id=%s", bundle_id)
 
     # 1) ORM으로 메모들 가져오기
@@ -176,20 +164,21 @@ def list_memories_for_bundle(
     # 2) Pydantic 모델로 "수동" 변환
     result: List[MemoryItemOut] = []
     for m in memories:
-        # ⚠️ metadata 같은 꼬인 필드는 아예 건드리지 않고,
-        #     MemoryItemOut이 요구하는 필드만 정확히 채워줌.
         item = MemoryItemOut(
             id=m.id,
             user_id=m.user_id,
             bundle_id=m.bundle_id,
             title=m.title,
             summary=m.summary,
+            original_text=m.original_text,           # 원문 포함
             source_type=m.source_type,
             source_id=m.source_id,
-            # metadata 필드가 스키마에 없다면 당연히 안 넣고,
-            # 만약 있다면 여기서 dict(...)나 None으로 강제하면 됨.
+            metadata=m.metadata_json,
             is_pinned=m.is_pinned,
             usage_count=m.usage_count,
+            last_used_at=m.last_used_at,
+            created_at=m.created_at,
+            updated_at=m.updated_at,
         )
         result.append(item)
 
@@ -205,16 +194,6 @@ def create_memory_for_bundle(
     """
     번들에 메모 저장 (+ 요약 자동 생성).
     프론트: POST /bundles/{bundle_id}/memories
-
-    body 예시:
-      {
-        "user_id": "1111-...",
-        "original_text": "여기에 대화 블록 전체",
-        "title": "옵션: 내가 붙이는 제목",
-        "source_type": "chat" | "note" | "import",
-        "source_id": null,
-        "metadata": {...}
-      }
     """
     logger.info(
         "[create_memory_for_bundle] bundle_id=%s user_id=%s title=%s",
@@ -246,4 +225,6 @@ def create_memory_for_bundle(
     db.commit()
     db.refresh(memory)
 
+    # 여기서는 ORM 객체를 그대로 리턴하면
+    # response_model=MemoryItemOut + from_attributes 로 자동 변환
     return memory
