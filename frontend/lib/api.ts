@@ -269,6 +269,7 @@ export async function updateMemoryInBundle(
     original_text?: string;
     summary?: string;
     metadata?: Record<string, any>;
+    bundle_id?: string;
   },
 ): Promise<MemoryItem> {
   const base = getApiBase();

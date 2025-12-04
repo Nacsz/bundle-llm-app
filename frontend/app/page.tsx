@@ -25,22 +25,23 @@ export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [showMemoryContext, setShowMemoryContext] = useState(false);
-  const [lastMemoryContext, setLastMemoryContext] = useState<string | null>(null);
+  const [lastMemoryContext, setLastMemoryContext] = useState<string | null>(
+    null,
+  );
 
   const [textToSave, setTextToSave] = useState("");
-  const [activeBundleId, setActiveBundleId] = useState<string | null>(null);
-  const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [isLoadingMemories, setIsLoadingMemories] = useState(false);
 
-  // 번들 상관없이, 선택된 메모 전체를 id → MemoryItem으로 저장
-  const [selectedMemories, setSelectedMemories] = useState<
-    Record<string, MemoryItem>
+  // 여러 번들을 동시에 펼치기
+  const [expandedBundleIds, setExpandedBundleIds] = useState<string[]>([]);
+  const [bundleMemories, setBundleMemories] = useState<
+    Record<string, MemoryItem[]>
+  >({});
+  const [loadingBundles, setLoadingBundles] = useState<
+    Record<string, boolean>
   >({});
 
-  // "번들 체크 → 메모 전체 선택"을 위해, 비동기 로딩 이후 한 번 실행할 플래그
-  const [pendingSelectAllBundleId, setPendingSelectAllBundleId] = useState<
-    string | null
-  >(null);
+  // 선택된 메모 id들 (번들 상관없이 전역)
+  const [selectedMemoryIds, setSelectedMemoryIds] = useState<string[]>([]);
 
   // 왼쪽 번들/메모 패널 접기/펼치기
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -48,8 +49,11 @@ export default function HomePage() {
   // 자동 메모 저장 ON/OFF
   const [autoSaveToBundle, setAutoSaveToBundle] = useState(false);
 
-  const activeBundleName =
-    bundles.find((b) => b.id === activeBundleId)?.name ?? null;
+  // "현재 번들"은 마지막으로 펼친 번들 기준
+  const currentBundleId =
+    expandedBundleIds.length > 0
+      ? expandedBundleIds[expandedBundleIds.length - 1]
+      : null;
 
   // 초기 번들 로드
   useEffect(() => {
@@ -64,116 +68,102 @@ export default function HomePage() {
     load();
   }, []);
 
-  // 번들 행 클릭 → 펼치기 / 접기
-  const handleExpandBundle = (bundleId: string) => {
-    setActiveBundleId((prev) => (prev === bundleId ? null : bundleId));
+  // 특정 번들의 메모 로드
+  const loadBundleMemories = async (bundleId: string) => {
+    try {
+      setLoadingBundles((prev) => ({ ...prev, [bundleId]: true }));
+      const items = await fetchMemoriesForBundle(bundleId);
+      setBundleMemories((prev) => ({
+        ...prev,
+        [bundleId]: items,
+      }));
+    } catch (err) {
+      console.error("fetchMemoriesForBundle failed", err);
+    } finally {
+      setLoadingBundles((prev) => ({ ...prev, [bundleId]: false }));
+    }
   };
 
-  // activeBundleId 변경 시 해당 번들의 메모 로드
-  useEffect(() => {
-    const loadMemoriesForActive = async () => {
-      if (!activeBundleId) {
-        setMemories([]);
-        return;
-      }
-      setIsLoadingMemories(true);
+  // 번들 행 클릭 → 펼치기 / 접기 (여러 개 동시에 가능)
+  const handleExpandBundle = (bundleId: string) => {
+    const isAlreadyExpanded = expandedBundleIds.includes(bundleId);
 
-      try {
-        const items = await fetchMemoriesForBundle(activeBundleId);
-        setMemories(items);
-      } catch (err) {
-        console.error("fetchMemoriesForBundle failed", err);
-      } finally {
-        setIsLoadingMemories(false);
-      }
-    };
-    loadMemoriesForActive();
-  }, [activeBundleId]);
+    if (isAlreadyExpanded) {
+      setExpandedBundleIds((prev) => prev.filter((id) => id !== bundleId));
+      return;
+    }
+
+    // 새로 펼칠 때는 메모 로드 + expanded 목록에 추가
+    setExpandedBundleIds((prev) => [...prev, bundleId]);
+    void loadBundleMemories(bundleId);
+  };
 
   // 번들 체크박스: 이 번들의 메모 전체 선택/해제 + 펼치기
   const handleToggleBundleSelectAll = (bundleId: string) => {
-    // 다른 번들을 누른 경우: 먼저 그 번들을 펼치고, 로드가 끝나면 전체 선택 처리
-    if (bundleId !== activeBundleId) {
-      setActiveBundleId(bundleId);
-      setPendingSelectAllBundleId(bundleId);
+    // 일단 펼쳐진 목록에 포함되도록 보장
+    setExpandedBundleIds((prev) =>
+      prev.includes(bundleId) ? prev : [...prev, bundleId],
+    );
+
+    const mems = bundleMemories[bundleId];
+    if (!mems || mems.length === 0) {
+      // 아직 메모를 안 불러온 경우 → 불러온 뒤 선택 처리
+      void (async () => {
+        const items = await fetchMemoriesForBundle(bundleId);
+        setBundleMemories((prev) => ({ ...prev, [bundleId]: items }));
+        if (items.length === 0) return;
+
+        setSelectedMemoryIds((prev) => {
+          const idsInBundle = items.map((m) => m.id);
+          const allSelected = idsInBundle.every((id) => prev.includes(id));
+          if (allSelected) {
+            // 모두 선택되어 있었다면 → 이 번들의 메모만 해제
+            return prev.filter((id) => !idsInBundle.includes(id));
+          }
+          // 일부 또는 아무것도 선택 안 되어 있으면 → 모두 추가
+          const set = new Set(prev);
+          idsInBundle.forEach((id) => set.add(id));
+          return Array.from(set);
+        });
+      })();
       return;
     }
 
-    // 이미 이 번들이 펼쳐져 있는 경우: 바로 전체 선택/해제
-    if (!activeBundleId || memories.length === 0) return;
-
-    const allSelected = memories.every((m) => !!selectedMemories[m.id]);
-    setSelectedMemories((prev) => {
-      const next = { ...prev };
+    // 이미 메모를 알고 있는 경우 바로 전체 선택/해제
+    setSelectedMemoryIds((prev) => {
+      const idsInBundle = mems.map((m) => m.id);
+      const allSelected = idsInBundle.every((id) => prev.includes(id));
       if (allSelected) {
-        // 전체 선택 상태였다면 → 모두 해제
-        memories.forEach((m) => {
-          delete next[m.id];
-        });
-      } else {
-        // 아니었다면 → 모두 선택
-        memories.forEach((m) => {
-          next[m.id] = m;
-        });
+        return prev.filter((id) => !idsInBundle.includes(id));
       }
-      return next;
+      const set = new Set(prev);
+      idsInBundle.forEach((id) => set.add(id));
+      return Array.from(set);
     });
   };
 
-  // "다른 번들을 선택 → 메모 로드 완료 → pendingSelectAllBundleId 일치" 시 전체 선택/해제
-  useEffect(() => {
-    if (
-      !activeBundleId ||
-      pendingSelectAllBundleId !== activeBundleId ||
-      memories.length === 0
-    ) {
-      return;
-    }
+  // 번들 체크박스 상태: 이 번들의 메모가 모두 선택되어 있을 때만 true
+  const isBundleFullySelected = (bundleId: string): boolean => {
+    const mems = bundleMemories[bundleId] ?? [];
+    if (mems.length === 0) return false;
+    return mems.every((m) => selectedMemoryIds.includes(m.id));
+  };
 
-    const allSelected = memories.every((m) => !!selectedMemories[m.id]);
+  const getMemoriesForBundle = (bundleId: string): MemoryItem[] => {
+    return bundleMemories[bundleId] ?? [];
+  };
 
-    setSelectedMemories((prev) => {
-      const next = { ...prev };
-      if (allSelected) {
-        memories.forEach((m) => {
-          delete next[m.id];
-        });
-      } else {
-        memories.forEach((m) => {
-          next[m.id] = m;
-        });
-      }
-      return next;
-    });
-
-    setPendingSelectAllBundleId(null);
-  }, [activeBundleId, memories, pendingSelectAllBundleId, selectedMemories]);
+  const isLoadingBundle = (bundleId: string): boolean => {
+    return loadingBundles[bundleId] ?? false;
+  };
 
   // 메모 개별 체크/해제
   const handleToggleMemorySelect = (memoryId: string) => {
-    const memory = memories.find((m) => m.id === memoryId);
-    if (!memory) return;
-
-    setSelectedMemories((prev) => {
-      const next = { ...prev };
-      if (next[memoryId]) {
-        delete next[memoryId];
-      } else {
-        next[memoryId] = memory;
-      }
-      return next;
-    });
-  };
-
-  // 현재 펼쳐진 번들에서 선택된 메모 id 목록
-  const selectedMemoryIdsForActive = memories
-    .filter((m) => !!selectedMemories[m.id])
-    .map((m) => m.id);
-
-  // 번들 체크박스가 "체크된 상태"인지: 이 번들의 모든 메모가 선택되어 있을 때만 true
-  const isBundleFullySelected = (bundleId: string): boolean => {
-    if (bundleId !== activeBundleId || memories.length === 0) return false;
-    return memories.every((m) => !!selectedMemories[m.id]);
+    setSelectedMemoryIds((prev) =>
+      prev.includes(memoryId)
+        ? prev.filter((id) => id !== memoryId)
+        : [...prev, memoryId],
+    );
   };
 
   // 채팅 보내기 (/chat에 선택된 메모 id만 보냄 + 자동 메모 저장)
@@ -191,9 +181,6 @@ export default function HomePage() {
     setIsSending(true);
 
     try {
-      const selectedMemoryArray = Object.values(selectedMemories);
-      const selectedMemoryIds = selectedMemoryArray.map((m) => m.id);
-
       const res = await sendChat({
         user_id: MOCK_USER_ID,
         message,
@@ -212,28 +199,29 @@ export default function HomePage() {
       setLastMemoryContext(res.memory_context);
 
       // ----- 자동 메모 저장 -----
-      if (autoSaveToBundle && activeBundleId) {
+      if (autoSaveToBundle && currentBundleId) {
         try {
           const titleBase = message.trim();
           const title =
-            titleBase.length > 30 ? titleBase.slice(0, 30) + "…" : titleBase || "자동 저장 메모";
+            titleBase.length > 30
+              ? titleBase.slice(0, 30) + "…"
+              : titleBase || "자동 저장 메모";
 
           const autoText = `사용자: ${message}\n\nLLM: ${res.answer}`;
 
-          const memory = await saveMemoryToBundle(activeBundleId, {
+          const memory = await saveMemoryToBundle(currentBundleId, {
             user_id: MOCK_USER_ID,
             original_text: autoText,
             title,
             metadata: { from_ui: "auto_chat_save" },
           });
 
-          // 현재 펼친 번들과 동일하면 리스트에 즉시 반영
-          if (activeBundleId === memory.bundle_id) {
-            setMemories((prev) => [memory, ...prev]);
-          }
+          setBundleMemories((prev) => ({
+            ...prev,
+            [currentBundleId]: [memory, ...(prev[currentBundleId] ?? [])],
+          }));
         } catch (err) {
           console.error("[auto-save] saveMemoryToBundle failed", err);
-          // UX상 조용히 실패해도 되고, 필요하면 alert 추가 가능
         }
       }
       // -------------------------
@@ -296,29 +284,35 @@ export default function HomePage() {
   const handleDeleteBundle = async (bundleId: string) => {
     const target = bundles.find((b) => b.id === bundleId);
     const name = target?.name ?? "";
-    if (!window.confirm(`"${name}" 번들을 삭제할까요? (메모도 함께 삭제됩니다)`)) {
+    if (
+      !window.confirm(
+        `"${name}" 번들을 삭제할까요? (이 번들의 메모도 함께 삭제됩니다)`,
+      )
+    ) {
       return;
     }
 
     try {
       await deleteBundle(bundleId);
+
+      // 번들 목록에서 제거
       setBundles((prev) => prev.filter((b) => b.id !== bundleId));
 
-      // 현재 펼쳐진 번들을 지운 경우
-      if (activeBundleId === bundleId) {
-        setActiveBundleId(null);
-        setMemories([]);
-      }
+      // 펼쳐진 목록에서 제거
+      setExpandedBundleIds((prev) => prev.filter((id) => id !== bundleId));
+
+      // 메모 캐시에서 제거
+      setBundleMemories((prev) => {
+        const next = { ...prev };
+        delete next[bundleId];
+        return next;
+      });
 
       // 선택된 메모들 중, 이 번들에 속한 것들 제거
-      setSelectedMemories((prev) => {
-        const next: Record<string, MemoryItem> = {};
-        for (const [id, mem] of Object.entries(prev)) {
-          if (mem.bundle_id !== bundleId) {
-            next[id] = mem;
-          }
-        }
-        return next;
+      setSelectedMemoryIds((prev) => {
+        const mems = bundleMemories[bundleId] ?? [];
+        const idsInBundle = new Set(mems.map((m) => m.id));
+        return prev.filter((id) => !idsInBundle.has(id));
       });
     } catch (err) {
       console.error("deleteBundle failed", err);
@@ -341,10 +335,11 @@ export default function HomePage() {
         metadata: { from_ui: "manual_save_panel" },
       });
 
-      // 현재 펼쳐진 번들과 같으면 리스트에 바로 반영
-      if (activeBundleId === bundleId) {
-        setMemories((prev) => [memory, ...prev]);
-      }
+      setBundleMemories((prev) => ({
+        ...prev,
+        [bundleId]: [memory, ...(prev[bundleId] ?? [])],
+      }));
+
       setTextToSave("");
     } catch (err) {
       console.error("saveMemoryToBundle failed", err);
@@ -352,28 +347,64 @@ export default function HomePage() {
     }
   };
 
-  // 메모 내용(제목/요약/원문) 편집
+  // 메모 내용(제목/요약/원문/번들) 편집
   const handleUpdateMemoryContent = async (
     memoryId: string,
-    patch: { title?: string; summary?: string; original_text?: string },
+    patch: {
+      title?: string;
+      summary?: string;
+      original_text?: string;
+      bundle_id?: string;
+    },
   ) => {
-    if (!activeBundleId) return;
+    // 이 메모가 속한 번들을 찾아야 함
+    let fromBundleId: string | null = null;
+
+    for (const [bId, mems] of Object.entries(bundleMemories)) {
+      if (mems.some((m) => m.id === memoryId)) {
+        fromBundleId = bId;
+        break;
+      }
+    }
+
+    if (!fromBundleId) {
+      console.warn(
+        "[handleUpdateMemoryContent] memory not found in any bundle",
+        memoryId,
+      );
+      return;
+    }
 
     try {
-      const updated = await updateMemoryInBundle(activeBundleId, memoryId, patch);
+      const updated = await updateMemoryInBundle(fromBundleId, memoryId, patch);
+      if (!updated) return;
 
-      // 리스트 갱신
-      setMemories((prev) =>
-        prev.map((m) => (m.id === memoryId ? updated : m)),
-      );
+      const toBundleId = updated.bundle_id || fromBundleId;
 
-      // 선택된 메모에도 반영
-      setSelectedMemories((prev) => {
-        if (!prev[memoryId]) return prev;
-        return {
-          ...prev,
-          [memoryId]: updated,
-        };
+      setBundleMemories((prev) => {
+        const next: Record<string, MemoryItem[]> = {};
+
+        // 먼저 모든 번들의 리스트에서 해당 메모 제거
+        for (const [bId, mems] of Object.entries(prev)) {
+          next[bId] = mems.filter((m) => m.id !== memoryId);
+        }
+
+        // 새 번들에 추가
+        const targetList = next[toBundleId] ?? [];
+        next[toBundleId] = [updated, ...targetList];
+
+        return next;
+      });
+
+      // 선택 상태 업데이트
+      setSelectedMemoryIds((prev) => {
+        if (!prev.includes(memoryId)) return prev;
+        if (toBundleId !== fromBundleId) {
+          // 번들이 바뀐 경우, 선택 목록에서 제거
+          return prev.filter((id) => id !== memoryId);
+        }
+        // 같은 번들 내 수정인 경우 그대로 유지
+        return prev;
       });
 
       return updated;
@@ -385,22 +416,40 @@ export default function HomePage() {
 
   // 메모 삭제
   const handleDeleteMemory = async (memoryId: string) => {
-    if (!activeBundleId) return;
+    // 이 메모가 속한 번들을 찾기
+    let bundleId: string | null = null;
+
+    for (const [bId, mems] of Object.entries(bundleMemories)) {
+      if (mems.some((m) => m.id === memoryId)) {
+        bundleId = bId;
+        break;
+      }
+    }
+
+    if (!bundleId) {
+      console.warn(
+        "[handleDeleteMemory] memory not found in any bundle",
+        memoryId,
+      );
+      return;
+    }
 
     if (!window.confirm("이 메모를 삭제할까요?")) return;
 
     try {
-      await deleteMemoryInBundle(activeBundleId, memoryId);
+      await deleteMemoryInBundle(bundleId, memoryId);
 
-      // 리스트에서 제거
-      setMemories((prev) => prev.filter((m) => m.id !== memoryId));
-
-      // 선택 목록에서도 제거
-      setSelectedMemories((prev) => {
+      setBundleMemories((prev) => {
         const next = { ...prev };
-        delete next[memoryId];
+        next[bundleId!] = (next[bundleId!] ?? []).filter(
+          (m) => m.id !== memoryId,
+        );
         return next;
       });
+
+      setSelectedMemoryIds((prev) =>
+        prev.filter((id) => id !== memoryId),
+      );
     } catch (err) {
       console.error("deleteMemoryInBundle failed", err);
       window.alert("메모 삭제 실패");
@@ -429,13 +478,13 @@ export default function HomePage() {
               <h2 className="mb-2 text-sm font-semibold">Bundles</h2>
               <BundlePanel
                 bundles={bundles}
-                activeBundleId={activeBundleId}
+                expandedBundleIds={expandedBundleIds}
                 onExpandBundle={handleExpandBundle}
                 onToggleBundleSelectAll={handleToggleBundleSelectAll}
                 isBundleFullySelected={isBundleFullySelected}
-                memories={memories}
-                isLoadingMemories={isLoadingMemories}
-                selectedMemoryIds={selectedMemoryIdsForActive}
+                getMemoriesForBundle={getMemoriesForBundle}
+                isLoadingBundle={isLoadingBundle}
+                selectedMemoryIds={selectedMemoryIds}
                 onToggleMemorySelect={handleToggleMemorySelect}
                 onCreateBundle={handleCreateBundle}
                 onEditBundle={handleEditBundle}

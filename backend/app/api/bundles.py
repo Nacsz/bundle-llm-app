@@ -2,14 +2,13 @@
 
 import logging
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from uuid import UUID
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from openai import OpenAI
-from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.models.bundle import Bundle
@@ -84,28 +83,57 @@ def summarize_for_memory(original_text: str) -> Optional[str]:
 
 
 # -------------------------
-# 요청 스키마 (수정용)
+# Update용 Pydantic 모델
 # -------------------------
+
 
 class BundleUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     color: Optional[str] = None
     icon: Optional[str] = None
-    parent_id: Optional[UUID] = Field(default=None)
     is_archived: Optional[bool] = None
 
 
 class MemoryUpdate(BaseModel):
     title: Optional[str] = None
-    original_text: Optional[str] = None
     summary: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    original_text: Optional[str] = None
+    metadata: Optional[dict] = None
+    is_pinned: Optional[bool] = None
+    usage_count: Optional[int] = None
+    # ✅ 번들 이동을 위한 필드
+    bundle_id: Optional[UUID] = Field(default=None)
 
 
 # -------------------------
-# Endpoints
+# Helper: MemoryItem → MemoryItemOut
 # -------------------------
+
+
+def memory_to_out(m: MemoryItem) -> MemoryItemOut:
+    return MemoryItemOut(
+        id=m.id,
+        user_id=m.user_id,
+        bundle_id=m.bundle_id,
+        title=m.title,
+        summary=m.summary,
+        original_text=m.original_text,
+        source_type=m.source_type,
+        source_id=m.source_id,
+        metadata=m.metadata_json or {},
+        is_pinned=m.is_pinned,
+        usage_count=m.usage_count,
+        last_used_at=m.last_used_at,
+        created_at=m.created_at,
+        updated_at=m.updated_at,
+    )
+
+
+# -------------------------
+# Bundle 엔드포인트들
+# -------------------------
+
 
 @router.get("/", response_model=List[BundleOut])
 def list_bundles(
@@ -160,9 +188,6 @@ def create_bundle(
     return bundle
 
 
-# ----- 번들 수정 / 삭제 -----
-
-
 @router.patch("/{bundle_id}", response_model=BundleOut)
 def update_bundle(
     bundle_id: UUID,
@@ -170,25 +195,36 @@ def update_bundle(
     db: Session = Depends(get_db),
 ):
     """
-    번들 수정.
+    번들 수정 (이름/설명/색상/아이콘/아카이브 등)
     프론트: PATCH /bundles/{bundle_id}
     """
-    logger.info("[update_bundle] bundle_id=%s body=%s", bundle_id, payload.dict(exclude_unset=True))
-
     bundle = db.query(Bundle).filter(Bundle.id == bundle_id).first()
     if not bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    data = payload.dict(exclude_unset=True)
+    updated = False
 
-    for field, value in data.items():
-        setattr(bundle, field, value)
+    if payload.name is not None:
+        bundle.name = payload.name
+        updated = True
+    if payload.description is not None:
+        bundle.description = payload.description
+        updated = True
+    if payload.color is not None:
+        bundle.color = payload.color
+        updated = True
+    if payload.icon is not None:
+        bundle.icon = payload.icon
+        updated = True
+    if payload.is_archived is not None:
+        bundle.is_archived = payload.is_archived
+        updated = True
 
-    if hasattr(bundle, "updated_at"):
-        bundle.updated_at = datetime.utcnow()
+    if updated:
+        db.add(bundle)
+        db.commit()
+        db.refresh(bundle)
 
-    db.commit()
-    db.refresh(bundle)
     return bundle
 
 
@@ -198,27 +234,24 @@ def delete_bundle(
     db: Session = Depends(get_db),
 ):
     """
-    번들 삭제.
-    - FK에 ON DELETE CASCADE가 안 걸려 있다면, 번들에 속한 메모도 직접 삭제.
+    번들 삭제 (안의 메모도 함께 삭제)
     프론트: DELETE /bundles/{bundle_id}
     """
-    logger.info("[delete_bundle] bundle_id=%s", bundle_id)
-
     bundle = db.query(Bundle).filter(Bundle.id == bundle_id).first()
     if not bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    # 번들에 속한 메모도 함께 삭제 (필요 시)
-    db.query(MemoryItem).where(MemoryItem.bundle_id == bundle_id).delete(
-        synchronize_session=False
-    )
-
+    # 번들 안의 메모 먼저 삭제
+    db.query(MemoryItem).filter(MemoryItem.bundle_id == bundle_id).delete()
     db.delete(bundle)
     db.commit()
-    return {"status": "ok"}
+
+    return {"ok": True}
 
 
-# ----- 번들 내 메모 목록 / 생성 -----
+# -------------------------
+# Memory 엔드포인트들
+# -------------------------
 
 
 @router.get("/{bundle_id}/memories", response_model=List[MemoryItemOut])
@@ -229,9 +262,6 @@ def list_memories_for_bundle(
     """
     특정 번들의 메모 목록 조회.
     프론트: GET /bundles/{bundle_id}/memories
-
-    ❗ 여기서는 ORM 객체를 그대로 리턴하지 않고,
-       우리가 직접 Pydantic 모델로 변환해서 metadata 문제를 우회한다.
     """
     logger.info("[list_memories_for_bundle] bundle_id=%s", bundle_id)
 
@@ -242,27 +272,7 @@ def list_memories_for_bundle(
         .all()
     )
 
-    result: List[MemoryItemOut] = []
-    for m in memories:
-        item = MemoryItemOut(
-            id=m.id,
-            user_id=m.user_id,
-            bundle_id=m.bundle_id,
-            title=m.title,
-            summary=m.summary,
-            original_text=m.original_text,
-            source_type=m.source_type,
-            source_id=m.source_id,
-            metadata=m.metadata_json,
-            is_pinned=m.is_pinned,
-            usage_count=m.usage_count,
-            last_used_at=m.last_used_at,
-            created_at=m.created_at,
-            updated_at=m.updated_at,
-        )
-        result.append(item)
-
-    return result
+    return [memory_to_out(m) for m in memories]
 
 
 @router.post("/{bundle_id}/memories", response_model=MemoryItemOut)
@@ -287,7 +297,7 @@ def create_memory_for_bundle(
     if not bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    # ---- 요약 생성 (실패해도 None이면 그냥 원문만 저장) ----
+    # 요약 생성 (실패해도 None이면 그냥 원문만 저장)
     summary_text = summarize_for_memory(payload.original_text)
 
     memory = MemoryItem(
@@ -305,28 +315,13 @@ def create_memory_for_bundle(
     db.commit()
     db.refresh(memory)
 
-    return MemoryItemOut(
-        id=memory.id,
-        user_id=memory.user_id,
-        bundle_id=memory.bundle_id,
-        title=memory.title,
-        summary=memory.summary,
-        original_text=memory.original_text,
-        source_type=memory.source_type,
-        source_id=memory.source_id,
-        metadata=memory.metadata_json,
-        is_pinned=memory.is_pinned,
-        usage_count=memory.usage_count,
-        last_used_at=memory.last_used_at,
-        created_at=memory.created_at,
-        updated_at=memory.updated_at,
-    )
+    return memory_to_out(memory)
 
 
-# ----- 메모 수정 / 삭제 -----
-
-
-@router.patch("/{bundle_id}/memories/{memory_id}", response_model=MemoryItemOut)
+@router.patch(
+    "/{bundle_id}/memories/{memory_id}",
+    response_model=MemoryItemOut,
+)
 def update_memory_for_bundle(
     bundle_id: UUID,
     memory_id: UUID,
@@ -334,17 +329,11 @@ def update_memory_for_bundle(
     db: Session = Depends(get_db),
 ):
     """
-    번들 안 특정 메모 수정.
+    메모 내용/메타데이터/핀 상태 수정 + 번들 이동까지 처리.
     프론트: PATCH /bundles/{bundle_id}/memories/{memory_id}
+    - bundle_id 필드가 들어오면, 해당 메모를 다른 번들로 이동시킨다.
     """
-    logger.info(
-        "[update_memory_for_bundle] bundle_id=%s memory_id=%s body=%s",
-        bundle_id,
-        memory_id,
-        payload.dict(exclude_unset=True),
-    )
-
-    mem = (
+    memory = (
         db.query(MemoryItem)
         .filter(
             MemoryItem.id == memory_id,
@@ -352,43 +341,49 @@ def update_memory_for_bundle(
         )
         .first()
     )
-    if not mem:
+    if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    data = payload.dict(exclude_unset=True)
+    updated = False
 
-    # metadata 처리 (metadata_json 컬럼 사용)
-    if "metadata" in data:
-        if hasattr(mem, "metadata_json"):
-            mem.metadata_json = data.pop("metadata")
-        else:
-            data.pop("metadata")
+    if payload.title is not None:
+        memory.title = payload.title
+        updated = True
+    if payload.summary is not None:
+        memory.summary = payload.summary
+        updated = True
+    if payload.original_text is not None:
+        memory.original_text = payload.original_text
+        updated = True
+    if payload.metadata is not None:
+        memory.metadata_json = payload.metadata
+        updated = True
+    if payload.is_pinned is not None:
+        memory.is_pinned = payload.is_pinned
+        updated = True
+    if payload.usage_count is not None:
+        memory.usage_count = payload.usage_count
+        updated = True
 
-    for field, value in data.items():
-        setattr(mem, field, value)
+    # ✅ 번들 이동 처리
+    if payload.bundle_id is not None and payload.bundle_id != memory.bundle_id:
+        target_bundle = (
+            db.query(Bundle).filter(Bundle.id == payload.bundle_id).first()
+        )
+        if not target_bundle:
+            raise HTTPException(
+                status_code=404, detail="Target bundle for move not found"
+            )
 
-    if hasattr(mem, "updated_at"):
-        mem.updated_at = datetime.utcnow()
+        memory.bundle_id = payload.bundle_id
+        updated = True
 
-    db.commit()
-    db.refresh(mem)
+    if updated:
+        db.add(memory)
+        db.commit()
+        db.refresh(memory)
 
-    return MemoryItemOut(
-        id=mem.id,
-        user_id=mem.user_id,
-        bundle_id=mem.bundle_id,
-        title=mem.title,
-        summary=mem.summary,
-        original_text=mem.original_text,
-        source_type=mem.source_type,
-        source_id=mem.source_id,
-        metadata=mem.metadata_json,
-        is_pinned=mem.is_pinned,
-        usage_count=mem.usage_count,
-        last_used_at=mem.last_used_at,
-        created_at=mem.created_at,
-        updated_at=mem.updated_at,
-    )
+    return memory_to_out(memory)
 
 
 @router.delete("/{bundle_id}/memories/{memory_id}")
@@ -398,16 +393,10 @@ def delete_memory_for_bundle(
     db: Session = Depends(get_db),
 ):
     """
-    번들 안 특정 메모 삭제.
+    메모 삭제
     프론트: DELETE /bundles/{bundle_id}/memories/{memory_id}
     """
-    logger.info(
-        "[delete_memory_for_bundle] bundle_id=%s memory_id=%s",
-        bundle_id,
-        memory_id,
-    )
-
-    mem = (
+    memory = (
         db.query(MemoryItem)
         .filter(
             MemoryItem.id == memory_id,
@@ -415,9 +404,10 @@ def delete_memory_for_bundle(
         )
         .first()
     )
-    if not mem:
+    if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    db.delete(mem)
+    db.delete(memory)
     db.commit()
-    return {"status": "ok"}
+
+    return {"ok": True}
