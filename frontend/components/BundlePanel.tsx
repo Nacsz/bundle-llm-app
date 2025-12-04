@@ -1,4 +1,4 @@
-// components/BundlePanel.tsx
+// frontend/components/BundlePanel.tsx
 "use client";
 
 import { useState } from "react";
@@ -21,7 +21,16 @@ type Props = {
   selectedMemoryIds: string[];
   onToggleMemorySelect: (memoryId: string) => void;
 
-  onCreateBundle: (name: string, parentId?: string | null) => void | Promise<void>;
+  onCreateBundle: (payload: { name: string; parentId?: string | null }) => void | Promise<void>;
+  onEditBundle: (bundleId: string) => void | Promise<void>;
+  onDeleteBundle: (bundleId: string) => void | Promise<void>;
+
+  onUpdateMemoryContent: (
+    memoryId: string,
+    patch: { title?: string; summary?: string; original_text?: string },
+  ) => Promise<MemoryItem | void> | void;
+  onDeleteMemory: (memoryId: string) => void | Promise<void>;
+
   chatMessages: ChatMessage[];
 };
 
@@ -36,6 +45,10 @@ export function BundlePanel({
   selectedMemoryIds,
   onToggleMemorySelect,
   onCreateBundle,
+  onEditBundle,
+  onDeleteBundle,
+  onUpdateMemoryContent,
+  onDeleteMemory,
 }: Props) {
   const [newBundleName, setNewBundleName] = useState("");
 
@@ -47,7 +60,7 @@ export function BundlePanel({
     }
 
     try {
-      await onCreateBundle(name, null);
+      await onCreateBundle({ name, parentId: null });
       setNewBundleName("");
     } catch (e) {
       console.error("onCreateBundle failed", e);
@@ -77,10 +90,7 @@ export function BundlePanel({
               return (
                 <li key={b.id} className="px-2 py-1.5">
                   {/* 번들 한 줄 */}
-                  <div
-                    className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-gray-50"
-                    onClick={() => onExpandBundle(b.id)}
-                  >
+                  <div className="flex items-center gap-2 rounded px-1 py-1 hover:bg-gray-50">
                     <input
                       type="checkbox"
                       className="h-3 w-3"
@@ -88,18 +98,37 @@ export function BundlePanel({
                       onClick={(e) => e.stopPropagation()}
                       onChange={() => onToggleBundleSelectAll(b.id)}
                     />
-                    <div className="flex-1 truncate">
-                      <div className="flex items-center gap-1">
-                        {b.icon && (
-                          <span className="text-[11px]">{b.icon}</span>
-                        )}
-                        <span className="truncate text-[12px]">{b.name}</span>
-                      </div>
-                      {b.description && (
-                        <div className="truncate text-[11px] text-gray-500">
-                          {b.description}
-                        </div>
+
+                    <button
+                      type="button"
+                      className="flex flex-1 items-center gap-1 truncate text-left"
+                      onClick={() => onExpandBundle(b.id)}
+                    >
+                      <span className="text-[11px]">
+                        {isExpanded ? "▾" : "▸"}
+                      </span>
+                      {b.icon && (
+                        <span className="text-[11px]">{b.icon}</span>
                       )}
+                      <span className="truncate text-[12px]">{b.name}</span>
+                    </button>
+
+                    {/* 번들 수정/삭제 버튼 */}
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onEditBundle(b.id)}
+                        className="rounded border border-gray-200 px-1.5 py-0.5 text-[10px] text-gray-600 hover:bg-gray-100"
+                      >
+                        수정
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteBundle(b.id)}
+                        className="rounded border border-red-200 px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-50"
+                      >
+                        삭제
+                      </button>
                     </div>
                   </div>
 
@@ -117,6 +146,8 @@ export function BundlePanel({
                           selectable
                           selectedIds={selectedMemoryIds}
                           onToggleSelect={onToggleMemorySelect}
+                          onEditMemoryContent={onUpdateMemoryContent}
+                          onDeleteMemory={onDeleteMemory}
                         />
                       )}
                     </div>

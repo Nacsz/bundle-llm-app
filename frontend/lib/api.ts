@@ -208,3 +208,107 @@ export async function createBundle(params: {
 
   return (await res.json()) as import("./types").Bundle;
 }
+
+// -------------------
+// 6) 번들 수정 / 삭제
+// -------------------
+
+export async function updateBundle(
+  bundleId: string,
+  patch: {
+    name?: string;
+    description?: string;
+    color?: string;
+    icon?: string;
+    parent_id?: string | null;
+    is_archived?: boolean;
+  },
+) {
+  const base = getApiBase();
+
+  const res = await fetch(`${base}/bundles/${bundleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[updateBundle] failed:", res.status, text);
+    throw new Error("Failed to update bundle");
+  }
+
+  return (await res.json()) as import("./types").Bundle;
+}
+
+export async function deleteBundle(bundleId: string) {
+  const base = getApiBase();
+
+  const res = await fetch(`${base}/bundles/${bundleId}`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[deleteBundle] failed:", res.status, text);
+    throw new Error("Failed to delete bundle");
+  }
+
+  return await res.json(); // { status: "ok" }
+}
+
+// -------------------
+// 7) 메모 수정 / 삭제
+// -------------------
+
+export async function updateMemoryInBundle(
+  bundleId: string,
+  memoryId: string,
+  patch: {
+    title?: string;
+    original_text?: string;
+    summary?: string;
+    metadata?: Record<string, any>;
+  },
+): Promise<MemoryItem> {
+  const base = getApiBase();
+
+  const res = await fetch(
+    `${base}/bundles/${bundleId}/memories/${memoryId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[updateMemoryInBundle] failed:", res.status, text);
+    throw new Error("Failed to update memory");
+  }
+
+  return (await res.json()) as MemoryItem;
+}
+
+export async function deleteMemoryInBundle(
+  bundleId: string,
+  memoryId: string,
+) {
+  const base = getApiBase();
+
+  const res = await fetch(
+    `${base}/bundles/${bundleId}/memories/${memoryId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[deleteMemoryInBundle] failed:", res.status, text);
+    throw new Error("Failed to delete memory");
+  }
+
+  return await res.json(); // { status: "ok" }
+}
