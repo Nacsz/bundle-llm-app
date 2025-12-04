@@ -50,11 +50,13 @@ export type MemoryItem = import("./types").MemoryItem;
 // 1) /chat 호출
 // -------------------
 
+// � 여기만 바뀜: selected_memory_ids 추가
 type SendChatPayload = {
   user_id: string;
   message: string;
   selected_bundle_ids: string[];
   history: ChatMessage[];
+  selected_memory_ids?: string[]; // 체크된 메모 id 배열 (없으면 안 보냄)
 };
 
 export async function sendChat(

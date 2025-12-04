@@ -2,16 +2,24 @@
 "use client";
 
 import React, { useState } from "react";
-import type { MemoryItem } from "../lib/api";
+import type { MemoryItem } from "@/lib/types";
 
 type MemoryListProps = {
   memories: MemoryItem[];
   activeBundleName?: string | null;
+
+  // 선택 가능 여부 / 선택 상태 / 토글 핸들러
+  selectable?: boolean;
+  selectedIds?: string[];
+  onToggleSelect?: (memoryId: string) => void;
 };
 
 export const MemoryList: React.FC<MemoryListProps> = ({
   memories,
   activeBundleName,
+  selectable = false,
+  selectedIds = [],
+  onToggleSelect,
 }) => {
   const [selectedMemory, setSelectedMemory] = useState<MemoryItem | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -34,63 +42,66 @@ export const MemoryList: React.FC<MemoryListProps> = ({
   };
 
   return (
-    <div className="h-full flex flex-col border-l border-gray-200 bg-white">
-      <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-gray-900">메모 리스트</h2>
-          <p className="text-xs text-gray-500">
-            {activeBundleName
-              ? `현재 번들: ${activeBundleName}`
-              : "번들을 선택하면 메모가 보입니다."}
-          </p>
-        </div>
-        <span className="text-xs text-gray-400">{memories.length}개</span>
-      </div>
-
-      {/* 메모 리스트 영역 */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+    <>
+      {/* 인라인 메모 리스트 */}
+      <div className="space-y-1">
         {memories.length === 0 ? (
-          <p className="text-xs text-gray-400 mt-2">
+          <p className="mt-1 text-[11px] text-gray-400">
             아직 이 번들에 저장된 메모가 없습니다.
           </p>
         ) : (
-          memories.map((memory) => (
-            <button
-              key={memory.id}
-              type="button"
-              onClick={() => handleOpen(memory)}
-              className="w-full text-left rounded-md border border-gray-200 bg-gray-50 px-3 py-2 hover:bg-gray-100 transition-colors"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-sm font-medium text-gray-900 truncate">
-                  {memory.title || "제목 없음"}
-                </h3>
-                {typeof memory.usage_count === "number" && (
-                  <span className="shrink-0 rounded-full bg-gray-200 px-2 py-0.5 text-[10px] text-gray-700">
-                    사용 {memory.usage_count}회
-                  </span>
+          memories.map((memory) => {
+            const checked = selectable && selectedIds.includes(memory.id);
+            return (
+              <div
+                key={memory.id}
+                className="flex items-start gap-2 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] hover:bg-gray-100 transition-colors"
+              >
+                {selectable && (
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-3 w-3"
+                    checked={checked}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => onToggleSelect && onToggleSelect(memory.id)}
+                  />
                 )}
+
+                <button
+                  type="button"
+                  onClick={() => handleOpen(memory)}
+                  className="flex-1 text-left"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate font-medium text-gray-900">
+                      {memory.title || "제목 없음"}
+                    </span>
+                    {typeof memory.usage_count === "number" && (
+                      <span className="shrink-0 rounded-full bg-gray-200 px-2 py-[1px] text-[9px] text-gray-700">
+                        사용 {memory.usage_count}회
+                      </span>
+                    )}
+                  </div>
+                  {memory.summary && (
+                    <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-600">
+                      {memory.summary}
+                    </p>
+                  )}
+                  <div className="mt-0.5 flex items-center justify-between text-[10px] text-gray-400">
+                    <span>{formatDateTime(memory.created_at)}</span>
+                    {memory.original_text && <span>자세히 보기…</span>}
+                  </div>
+                </button>
               </div>
-              {memory.summary && (
-                <p className="mt-1 text-xs text-gray-600 line-clamp-2">
-                  {memory.summary}
-                </p>
-              )}
-              <div className="mt-1 flex items-center justify-between text-[10px] text-gray-400">
-                <span>{formatDateTime(memory.created_at)}</span>
-                {memory.original_text && (
-                  <span className="italic">자세히 보기…</span>
-                )}
-              </div>
-            </button>
-          ))
+            );
+          })
         )}
       </div>
 
       {/* 모달 */}
       {selectedMemory && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="max-h-[80vh] w-full max-w-2xl rounded-lg bg-white shadow-lg flex flex-col">
+          <div className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg bg-white shadow-lg">
             {/* 헤더 */}
             <div className="flex items-start justify-between border-b px-4 py-3">
               <div>
@@ -99,13 +110,12 @@ export const MemoryList: React.FC<MemoryListProps> = ({
                 </h3>
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
                   {selectedMemory.created_at && (
-                    <span>
-                      생성: {formatDateTime(selectedMemory.created_at)}
-                    </span>
+                    <span>생성: {formatDateTime(selectedMemory.created_at)}</span>
                   )}
                   {typeof selectedMemory.usage_count === "number" && (
                     <span>사용 {selectedMemory.usage_count}회</span>
                   )}
+                  {activeBundleName && <span>번들: {activeBundleName}</span>}
                 </div>
               </div>
               <button
@@ -141,18 +151,13 @@ export const MemoryList: React.FC<MemoryListProps> = ({
                       : "bg-gray-100 text-gray-700"
                   } ${
                     !selectedMemory.original_text
-                      ? "opacity-40 cursor-not-allowed"
+                      ? "cursor-not-allowed opacity-40"
                       : ""
                   }`}
                 >
                   원문 보기
                 </button>
               </div>
-              {activeBundleName && (
-                <span className="text-[11px] text-gray-400">
-                  번들: {activeBundleName}
-                </span>
-              )}
             </div>
 
             {/* 내용 */}
@@ -191,6 +196,6 @@ export const MemoryList: React.FC<MemoryListProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 };
