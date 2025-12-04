@@ -1,282 +1,215 @@
 # app/api/chat.py
-import os
+
 import json
 import logging
-from typing import List, Literal, Optional, Tuple
-from uuid import UUID
+import os
+from datetime import datetime
+from typing import List, Any, Dict, Optional
 
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 from openai import OpenAI, AuthenticationError, APIConnectionError, APIStatusError
 
-from app.core.db import SessionLocal
-from app import models  # MemoryItem, Bundle 등
+from app.core.db import get_db
+from app.schemas.chat import ChatRequest, ChatResponse
+from app.models.memory_item import MemoryItem
 
 logger = logging.getLogger("app.chat")
 
-# ----- FastAPI Router -----
-# prefix는 main.py에서 app.include_router(chat.router)로만 쓰고 있어서
-# 여기서는 단순 router만 만들고, path는 "/chat"으로 적어줌
-router = APIRouter()
+# -------------------------
+# OpenAI 클라이언트 초기화
+# -------------------------
 
-# ----- OpenAI 클라이언트 준비 -----
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if OPENAI_API_KEY:
-    logger.info("[chat.py] OPENAI_API_KEY detected (length=%d)", len(OPENAI_API_KEY))
+    print(f"[chat.py] OPENAI_API_KEY detected (length: {len(OPENAI_API_KEY)})")
     client: Optional[OpenAI] = OpenAI(api_key=OPENAI_API_KEY)
 else:
-    logger.warning("[chat.py] OPENAI_API_KEY is NOT set. Using echo mode.")
+    print("[chat.py] WARNING: OPENAI_API_KEY is NOT set. Using echo mode.")
     client = None
 
-# 한 번에 LLM에 보낼 최대 히스토리 길이
-MAX_HISTORY = 10
-# memory_context로 붙일 최대 메모 개수
-MAX_MEMORY_ITEMS = 8
+# -------------------------
+# 설정값
+# -------------------------
+
+MAX_HISTORY_ITEMS = 10          # 히스토리는 최신 10개만
+MAX_MEMORY_ITEMS = 5            # 번들 메모는 최대 5개만 context에 사용
+MEMORY_SNIPPET_MAX_LEN = 300    # 메모 한 개당 잘라낼 최대 길이
+
+# -------------------------
+# Router
+# -------------------------
+
+# main.py에서 app.include_router(chat.router) 하고 있으므로
+# prefix 없이 /chat 으로 바로 노출되게 둔다.
+router = APIRouter()
 
 
-# ----- Pydantic 모델 -----
-class ChatHistoryItem(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str
+def _build_memory_context(memories: List[MemoryItem]) -> str:
+    """선택된 번들에서 가져온 메모들로 memory_context 문자열을 만든다."""
+    if not memories:
+        return ""
+
+    lines: List[str] = [
+        "다음은 사용자가 과거에 저장해 둔 중요한 메모들이야.",
+        "필요하면 이 정보를 참고해서 현재 질문에 답해 줘."
+    ]
+    for idx, m in enumerate(memories, start=1):
+        text = m.summary or m.original_text or ""
+        if len(text) > MEMORY_SNIPPET_MAX_LEN:
+            text = text[:MEMORY_SNIPPET_MAX_LEN] + "..."
+        title = m.title or f"메모 {idx}"
+        lines.append(f"- {title}: {text}")
+
+    return "\n".join(lines)
 
 
-class ChatRequest(BaseModel):
-    user_id: str
-    message: str
-    history: List[ChatHistoryItem] = []
-    selected_bundle_ids: Optional[List[str]] = None
-
-
-class UsedMemoryItem(BaseModel):
-    id: str
-    bundle_id: str
-    title: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    # 프론트에서 기대하는 필드 이름에 맞춰줌 (지금은 answer 사용 중)
-    answer: str
-    memory_context: str = ""
-    used_memories: List[UsedMemoryItem] = []
-
-
-# ----- helper: 번들 메모 → memory_context 생성 -----
-def build_memory_context(
-    user_id_str: str,
-    bundle_ids: Optional[List[str]],
-) -> Tuple[str, List[UsedMemoryItem]]:
-    """
-    선택된 번들들에서 최근 메모들을 불러와서
-    - memory_context 텍스트
-    - used_memories 리스트
-    를 만들어준다.
-    DB 에러가 나면 그냥 빈 값 리턴.
-    """
-    if not bundle_ids:
-        return "", []
-
-    try:
-        user_uuid = UUID(user_id_str)
-    except Exception:
-        # user_id가 UUID 형식이 아니어도 동작은 되게 하고 싶으면,
-        # 여기서 user_id 필터를 빼버리는 것도 가능함.
-        user_uuid = None
-
-    # bundle_id들을 UUID로 변환 (형식 이상한 건 스킵)
-    bundle_uuid_list = []
-    for bid in bundle_ids:
-        try:
-            bundle_uuid_list.append(UUID(bid))
-        except Exception:
-            continue
-
-    if not bundle_uuid_list:
-        return "", []
-
-    db = SessionLocal()
-    try:
-        q = db.query(models.MemoryItem).filter(
-            models.MemoryItem.bundle_id.in_(bundle_uuid_list)
-        )
-        if user_uuid is not None:
-            q = q.filter(models.MemoryItem.user_id == user_uuid)
-
-        # 최신 메모부터 MAX_MEMORY_ITEMS개 가져오기
-        q = q.order_by(models.MemoryItem.created_at.desc()).limit(MAX_MEMORY_ITEMS)
-        rows = q.all()
-
-        if not rows:
-            return "", []
-
-        lines: List[str] = []
-        used: List[UsedMemoryItem] = []
-
-        for m in rows:
-            # title / summary / original_text 중에서 보기 좋은 것 선택
-            title = getattr(m, "title", None)
-            summary = getattr(m, "summary", None)
-            original_text = getattr(m, "original_text", "")
-
-            text_for_context = summary or original_text or ""
-            if len(text_for_context) > 200:
-                text_for_context = text_for_context[:200] + "..."
-
-            if title:
-                line = f"- ({title}) {text_for_context}"
-            else:
-                line = f"- {text_for_context}"
-
-            lines.append(line)
-
-            used.append(
-                UsedMemoryItem(
-                    id=str(m.id),
-                    bundle_id=str(m.bundle_id),
-                    title=title,
-                )
-            )
-
-        context_text = "\n".join(lines)
-        return context_text, used
-
-    except Exception as e:
-        logger.exception("[chat.py] build_memory_context error: %r", e)
-        return "", []
-    finally:
-        db.close()
-
-
-# ----- /chat 엔드포인트 -----
 @router.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(req: ChatRequest) -> ChatResponse:
+async def chat_endpoint(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+) -> ChatResponse:
     """
-    LLM 호출 + 실패 시 echo 모드로 응답.
-    - 최근 MAX_HISTORY개만 LLM에 전달
-    - selected_bundle_ids에 해당하는 메모들을 memory_context로 포함
-    - 절대 500으로 죽지 않게 방어적으로 작성
+    - 프론트에서 보내준 history 중 마지막 10개만 사용
+    - 선택된 번들(selected_bundle_ids)에 들어있는 메모들을 읽어서 memory_context 구성
+    - OpenAI에 system + memory_context + history + 현재 user 메시지를 보내서 답변
+    - 실패 시에는 에코 모드로라도 항상 200 + ChatResponse 리턴
     """
+    # 기본 값 정리
+    history_raw: List[Dict[str, Any]] = req.history or []
+    if len(history_raw) > MAX_HISTORY_ITEMS:
+        history = history_raw[-MAX_HISTORY_ITEMS:]
+    else:
+        history = history_raw
+
     logger.info(
         "[CHAT REQUEST] user_id=%s message=%r history_len=%d selected_bundle_ids=%s",
-        req.user_id,
+        str(req.user_id),
         req.message,
-        len(req.history),
-        req.selected_bundle_ids,
+        len(history),
+        [str(b) for b in (req.selected_bundle_ids or [])],
     )
 
-    # 0. 키가 아예 없는 경우 → 에코 모드
-    if client is None:
-        logger.warning("[chat.py] No OpenAI client. Returning echo mode.")
-        return ChatResponse(
-            answer=f"[NO_API_KEY] echo: {req.message}",
-            memory_context="",
-            used_memories=[],
-        )
+    # -------------------------
+    # 1) 선택된 번들에서 메모 가져오기
+    # -------------------------
+    memories: List[MemoryItem] = []
+    if req.selected_bundle_ids:
+        try:
+            memories = (
+                db.query(MemoryItem)
+                .filter(
+                    MemoryItem.user_id == req.user_id,
+                    MemoryItem.bundle_id.in_(req.selected_bundle_ids),
+                )
+                .order_by(
+                    MemoryItem.is_pinned.desc(),
+                    MemoryItem.usage_count.desc(),
+                    MemoryItem.created_at.desc(),
+                )
+                .limit(MAX_MEMORY_ITEMS)
+                .all()
+            )
+        except Exception as e:
+            logger.error("[chat] error while loading memories: %r", e)
+            memories = []
 
-    # 1. history 슬라이싱 (최근 MAX_HISTORY개만 사용)
-    if len(req.history) > MAX_HISTORY:
-        history_for_llm = req.history[-MAX_HISTORY:]
-    else:
-        history_for_llm = req.history
+    memory_context = _build_memory_context(memories)
 
-    logger.info(
-        "[CHAT] using history_len=%d (original=%d)",
-        len(history_for_llm),
-        len(req.history),
-    )
-
-    # 2. 선택된 번들에서 메모 읽어서 memory_context 구성
-    memory_context_text, used_memories = build_memory_context(
-        user_id_str=req.user_id,
-        bundle_ids=req.selected_bundle_ids,
-    )
-
-    # 3. system 프롬프트 구성
-    base_system_prompt = (
+    # -------------------------
+    # 2) system + memory_context + history + user message로 messages 구성
+    # -------------------------
+    system_content = (
         "You are an assistant that helps the user with their projects. "
-        "Answer in Korean by default unless the user uses another language."
+        "Answer in Korean by default unless the user uses another language.\n"
+        "[memory_context]\n"
+        f"{memory_context or 'No special memories for this query.'}\n"
+        "[/memory_context]\n\n"
+        "Guidelines:\n"
+        "- Use the information in [memory_context] as helpful background.\n"
+        "- If it conflicts with what the user says now, ask for clarification.\n"
+        "- If something is not in the memory_context, just answer normally."
     )
 
-    if memory_context_text:
-        system_content = (
-            f"{base_system_prompt}\n\n"
-            "[memory_context]\n"
-            f"{memory_context_text}\n"
-            "[/memory_context]"
-        )
-    else:
-        system_content = base_system_prompt
-
-    messages = [
-        {"role": "system", "content": system_content},
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_content}
     ]
-
-    for h in history_for_llm:
-        messages.append({"role": h.role, "content": h.content})
+    for h in history:
+        # h는 {"role": "...", "content": "..."} 형태라고 가정
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": req.message})
 
-    # 디버그용 payload 로그 (내용만 보기 좋게 출력)
-    try:
-        logger.info(
-            "[LLM REQUEST PAYLOAD]\n%s",
-            json.dumps(
-                {
-                    "model": "gpt-4.1-mini",
-                    "messages": messages,
-                    "max_tokens": 512,
-                    "temperature": 0.7,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
-    except Exception:
-        # 로그에서 예외 나도 실제 요청은 계속 가야 하므로 무시
-        pass
+    # 로깅용 payload
+    payload_for_log = {
+        "model": "gpt-4.1-mini",
+        "messages": messages,
+        "max_tokens": 512,
+        "temperature": 0.7,
+    }
+    logger.info("[LLM REQUEST PAYLOAD]\n%s", json.dumps(payload_for_log, ensure_ascii=False, indent=2))
 
-    # 4. OpenAI 호출
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            max_tokens=512,
-            temperature=0.7,
+    # -------------------------
+    # 3) OpenAI 호출 (키 없으면 에코 모드)
+    # -------------------------
+    if client is None:
+        logger.warning("[chat] No OpenAI client. Returning echo mode.")
+        return ChatResponse(
+            answer=f"[NO_API_KEY] echo: {req.message}",
+            memory_context=memory_context,
         )
+
+    try:
+        completion = client.chat.completions.create(**payload_for_log)
         reply_text = completion.choices[0].message.content
         logger.info("[LLM RESPONSE] %r", reply_text)
 
+        # 메모 사용 기록 업데이트 (usage_count, last_used_at)
+        if memories:
+            try:
+                now = datetime.utcnow()
+                for m in memories:
+                    m.usage_count = (m.usage_count or 0) + 1
+                    m.last_used_at = now
+                db.commit()
+            except Exception as e:
+                # 사용 기록 업데이트 실패해도 메인 로직은 깨지지 않게
+                logger.error("[chat] failed to update memory usage: %r", e)
+                db.rollback()
+
         return ChatResponse(
             answer=reply_text,
-            memory_context=memory_context_text,
-            used_memories=used_memories,
+            memory_context=memory_context,
         )
 
-    # 5. 다양한 에러 케이스 방어
+    # -------------------------
+    # 4) 각종 에러 → 에코 모드
+    # -------------------------
     except AuthenticationError as e:
-        logger.warning("[chat.py] AuthenticationError: %r", e)
+        logger.error("[chat] AuthenticationError: %r", e)
         return ChatResponse(
             answer=f"[AUTH_ERROR] API 키 인증 오류로 echo 모드로 응답합니다: {req.message}",
-            memory_context=memory_context_text,
-            used_memories=used_memories,
+            memory_context=memory_context,
         )
     except APIConnectionError as e:
-        logger.warning("[chat.py] APIConnectionError: %r", e)
+        logger.error("[chat] APIConnectionError: %r", e)
         return ChatResponse(
             answer=f"[NETWORK_ERROR] OpenAI 서버에 연결할 수 없어 echo 모드로 응답합니다: {req.message}",
-            memory_context=memory_context_text,
-            used_memories=used_memories,
+            memory_context=memory_context,
         )
     except APIStatusError as e:
-        logger.warning("[chat.py] APIStatusError: %r", e)
+        logger.error("[chat] APIStatusError: %r", e)
         return ChatResponse(
             answer=f"[OPENAI_STATUS_ERROR] 상태코드={e.status_code}, echo: {req.message}",
-            memory_context=memory_context_text,
-            used_memories=used_memories,
+            memory_context=memory_context,
         )
     except Exception as e:
-        logger.exception("[chat.py] UNKNOWN ERROR: %r", e)
+        logger.error("[chat] UNKNOWN ERROR: %r", e)
         return ChatResponse(
             answer=f"[UNKNOWN_ERROR] 서버 내부 오류로 echo 모드로 응답합니다: {req.message}",
-            memory_context=memory_context_text,
-            used_memories=used_memories,
+            memory_context=memory_context,
         )
