@@ -1,7 +1,13 @@
 # app/schemas/chat.py
-from pydantic import BaseModel
 from uuid import UUID
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Literal
+
+from pydantic import BaseModel
+
+
+class ChatHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
 
 
 class ChatRequest(BaseModel):
@@ -9,7 +15,7 @@ class ChatRequest(BaseModel):
     user_id: UUID
     message: str
     selected_bundle_ids: List[UUID] = []
-    history: Optional[List[Dict[str, Any]]] = None  # [{"role": "...", "content": "..."}]
+    history: List[ChatHistoryItem] = []  # [{role, content}, ...]
 
 
 class UsedMemory(BaseModel):

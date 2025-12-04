@@ -1,7 +1,10 @@
 # app/schemas/memory.py
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
 from typing import Optional, Literal, Any, Dict
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
+
 
 class MemoryFromBlockCreate(BaseModel):
     user_id: UUID
@@ -19,14 +22,16 @@ class MemoryItemOut(BaseModel):
     bundle_id: Optional[UUID]
     title: Optional[str]
     summary: Optional[str]
+    original_text: Optional[str] = None  # 원문 추가
     source_type: str
     source_id: Optional[str]
 
-    # � 여기만 정확히 이렇게 맞춰줘:
-    #    dict 강제 ❌ → Any 허용 ⭕
     metadata: Any | None = None
 
     is_pinned: bool
     usage_count: int
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
