@@ -21,8 +21,12 @@ class MemoryItemOut(BaseModel):
     summary: Optional[str]
     source_type: str
     source_id: Optional[str]
+
+    # � 여기만 정확히 이렇게 맞춰줘:
+    #    dict 강제 ❌ → Any 허용 ⭕
+    metadata: Any | None = None
+
     is_pinned: bool
     usage_count: int
+
     model_config = ConfigDict(from_attributes=True)
-
-

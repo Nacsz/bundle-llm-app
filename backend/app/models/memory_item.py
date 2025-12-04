@@ -1,34 +1,66 @@
 # app/models/memory_item.py
 
-from sqlalchemy import Column, String, Text, TIMESTAMP, Boolean, Integer, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from datetime import datetime
+from uuid import uuid4
+
+from sqlalchemy import (
+    Column,
+    String,
+    Text,
+    Boolean,
+    Integer,
+    DateTime,
+    ForeignKey,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+
 from app.core.db import Base
+
 
 class MemoryItem(Base):
     __tablename__ = "memory_items"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    bundle_id = Column(UUID(as_uuid=True), ForeignKey("bundles.id", ondelete="SET NULL"))
+    # ---------- 기본 키 / FK ----------
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    bundle_id = Column(PG_UUID(as_uuid=True), ForeignKey("bundles.id"), nullable=True)
 
-    title = Column(String(200))
+    # ---------- 내용 ----------
+    title = Column(String(255), nullable=True)
     original_text = Column(Text, nullable=False)
-    summary = Column(Text)
+    summary = Column(Text, nullable=True)
 
-    source_type = Column(String(30), nullable=False)
-    source_id = Column(String(255))
+    source_type = Column(String(50), nullable=False, default="chat")
+    source_id = Column(String(255), nullable=True)
 
-    # 🔥 여기가 핵심: 파이썬 속성 이름은 metadata_json,
-    # 실제 DB 컬럼 이름은 "metadata" 로 유지
-    metadata_json = Column("metadata", JSONB)
+    # � 여기 중요:
+    # DB 실제 컬럼 이름은 "metadata" 그대로 두고,
+    # 파이썬 속성 이름만 metadata_json 으로 사용
+    metadata_json = Column(
+        "metadata",           # DB 컬럼 이름
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
 
-    is_pinned = Column(Boolean, nullable=False, server_default="false")
-    usage_count = Column(Integer, nullable=False, server_default="0")
-    last_used_at = Column(TIMESTAMP(timezone=True))
+    is_pinned = Column(Boolean, nullable=False, default=False)
+    usage_count = Column(Integer, nullable=False, default=0)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
 
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+        server_onupdate=text("now()"),
+    )
 
-    bundle = relationship("Bundle", back_populates="memories")
+    # 관계
+    user = relationship("User", backref="memory_items", lazy="joined")
+    bundle = relationship("Bundle", backref="memory_items", lazy="joined")
