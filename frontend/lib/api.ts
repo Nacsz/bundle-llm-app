@@ -3,30 +3,59 @@
 // -------------------
 // 공통 API base URL
 // -------------------
-function getApiBase() {
-  if (typeof window !== "undefined") {
-    const { protocol, hostname } = window.location;
-    return `${protocol}//${hostname}:8000`;
-  }
 
-  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
-    return process.env.NEXT_PUBLIC_API_BASE_URL;
-  }
+// .env.local 에서 지정한 API 베이스 URL만 사용한다.
+// 예)
+//   NEXT_PUBLIC_API_BASE=https://nacsiz.xyz/api
+//   NEXT_PUBLIC_API_BASE=http://localhost:8000
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "");
 
-  return "http://backend:8000";
+export function getApiBase() {
+  if (!API_BASE) {
+    console.warn(
+      "[getApiBase] NEXT_PUBLIC_API_BASE 가 설정되어 있지 않습니다.",
+    );
+  }
+  return API_BASE;
 }
 
 export function debugApiBase() {
   const base = getApiBase();
   if (typeof window !== "undefined") {
-    console.log("[API_BASE] (browser)", base);
+    console.log(
+      "[API_BASE] hostname =",
+      window.location.hostname,
+      "→",
+      base,
+    );
   } else {
-    console.log("[API_BASE] (server)", base);
+    console.log("[API_BASE] (server) =", base);
   }
 }
 
-export const API_BASE = getApiBase();
-export { getApiBase };
+// 공통 fetch 래퍼
+async function apiFetch(path: string, options?: RequestInit) {
+  const base = getApiBase();
+  const url = `${base}${path}`;
+
+  console.log("API request:", url, options?.method || "GET");
+
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.headers || {}),
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    console.error("[apiFetch] failed:", res.status, url, text || "(no body)");
+    throw new Error(`[apiFetch] failed: ${res.status} ${url}`);
+  }
+
+  return res;
+}
 
 // -------------------
 // 타입들
@@ -43,7 +72,6 @@ export interface ChatApiResponse {
   used_memories: any[];
 }
 
-// MemoryItem 타입은 lib/types.ts 것을 그대로 사용
 export type MemoryItem = import("./types").MemoryItem;
 
 // -------------------
@@ -55,24 +83,16 @@ type SendChatPayload = {
   message: string;
   selected_bundle_ids: string[];
   history: ChatMessage[];
+  selected_memory_ids?: string[];
 };
 
 export async function sendChat(
   payload: SendChatPayload,
 ): Promise<ChatApiResponse> {
-  const base = getApiBase();
-
-  const res = await fetch(`${base}/chat`, {
+  const res = await apiFetch(`/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("[sendChat] failed:", res.status, text);
-    throw new Error(`sendChat failed: ${res.status}`);
-  }
 
   const data = await res.json();
   return {
@@ -87,20 +107,12 @@ export async function sendChat(
 // -------------------
 
 export async function fetchBundles(userId: string) {
-  const base = getApiBase();
+  const params = new URLSearchParams({ user_id: userId });
 
-  const res = await fetch(
-    `${base}/bundles?user_id=${encodeURIComponent(userId)}`,
-    {
-      method: "GET",
-      cache: "no-store",
-    },
-  );
-
-  if (!res.ok) {
-    console.error("[fetchBundles] failed:", res.status);
-    throw new Error(`fetchBundles failed: ${res.status}`);
-  }
+  const res = await apiFetch(`/bundles/?${params.toString()}`, {
+    method: "GET",
+    cache: "no-store",
+  });
 
   return res.json() as Promise<import("./types").Bundle[]>;
 }
@@ -108,31 +120,20 @@ export async function fetchBundles(userId: string) {
 // -------------------
 // 3) 특정 번들의 메모 목록
 // -------------------
+
 export async function fetchMemoriesForBundle(
   bundleId: string,
 ): Promise<MemoryItem[]> {
-  const base = getApiBase();
-
   try {
-    const res = await fetch(`${base}/bundles/${bundleId}/memories`, {
+    const res = await apiFetch(`/bundles/${bundleId}/memories`, {
       method: "GET",
       cache: "no-store",
     });
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.warn(
-        "[fetchMemoriesForBundle] HTTP error",
-        res.status,
-        text || "(no body)",
-      );
-      return [];
-    }
-
     const data = await res.json();
     return (data ?? []) as MemoryItem[];
   } catch (err) {
-    console.warn("[fetchMemoriesForBundle] network error", err);
+    console.warn("[fetchMemoriesForBundle] error", err);
     return [];
   }
 }
@@ -152,19 +153,10 @@ export async function saveMemoryToBundle(
   bundleId: string,
   payload: SaveMemoryPayload,
 ): Promise<MemoryItem> {
-  const base = getApiBase();
-
-  const res = await fetch(`${base}/bundles/${bundleId}/memories`, {
+  const res = await apiFetch(`/bundles/${bundleId}/memories`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("[saveMemoryToBundle] failed:", res.status, text);
-    throw new Error(`saveMemoryToBundle failed: ${res.status}`);
-  }
 
   return (await res.json()) as MemoryItem;
 }
@@ -181,28 +173,84 @@ export async function createBundle(params: {
   icon?: string;
   parent_id?: string | null;
 }) {
-  const base = getApiBase();
-
   const body = {
     user_id: params.user_id,
     name: params.name,
     description: params.description ?? "",
     color: params.color ?? "#4F46E5",
-    icon: params.icon ?? "�",
+    icon: params.icon ?? "📁",
     parent_id: params.parent_id ?? null,
   };
 
-  const res = await fetch(`${base}/bundles/`, {
+  const res = await apiFetch(`/bundles/`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("[createBundle] failed:", res.status, text);
-    throw new Error("Failed to create bundle");
-  }
+  return (await res.json()) as import("./types").Bundle;
+}
+
+// -------------------
+// 6) 번들 수정 / 삭제
+// -------------------
+
+export async function updateBundle(
+  bundleId: string,
+  patch: {
+    name?: string;
+    description?: string;
+    color?: string;
+    icon?: string;
+    parent_id?: string | null;
+    is_archived?: boolean;
+  },
+) {
+  const res = await apiFetch(`/bundles/${bundleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 
   return (await res.json()) as import("./types").Bundle;
+}
+
+export async function deleteBundle(bundleId: string) {
+  const res = await apiFetch(`/bundles/${bundleId}`, {
+    method: "DELETE",
+  });
+
+  return await res.json();
+}
+
+// -------------------
+// 7) 메모 수정 / 삭제
+// -------------------
+
+export async function updateMemoryInBundle(
+  bundleId: string,
+  memoryId: string,
+  patch: {
+    title?: string;
+    original_text?: string;
+    summary?: string;
+    metadata?: Record<string, any>;
+    bundle_id?: string;
+  },
+): Promise<MemoryItem> {
+  const res = await apiFetch(`/bundles/${bundleId}/memories/${memoryId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+  return (await res.json()) as MemoryItem;
+}
+
+export async function deleteMemoryInBundle(
+  bundleId: string,
+  memoryId: string,
+) {
+  const res = await apiFetch(`/bundles/${bundleId}/memories/${memoryId}`, {
+    method: "DELETE",
+  });
+
+  return await res.json();
 }
