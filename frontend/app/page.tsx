@@ -1,6 +1,6 @@
 // frontend/app/page.tsx
 "use client";
-
+import { debugApiBase } from "@/lib/api";
 import { useState, useEffect } from "react";
 import type { Bundle, ChatMessage, MemoryItem } from "@/lib/types";
 import { ChatWindow } from "@/components/ChatWindow";
@@ -57,6 +57,7 @@ export default function HomePage() {
 
   // 초기 번들 로드
   useEffect(() => {
+    debugApiBase();
     const load = async () => {
       try {
         const data = await fetchBundles(MOCK_USER_ID);
