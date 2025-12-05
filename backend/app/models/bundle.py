@@ -24,7 +24,7 @@ class Bundle(Base):
         nullable=False,
     )
 
-    # 🔥 번들 트리 구조를 위한 부모 번들 (없으면 루트 번들)
+    # 번들 트리 구조를 위한 부모 번들 (없으면 루트 번들)
     parent_id = Column(
         UUID(as_uuid=True),
         ForeignKey("bundles.id", ondelete="CASCADE"),
@@ -48,7 +48,7 @@ class Bundle(Base):
         server_default=func.now(),
     )
 
-    # 🔥 self-referential 관계 (폴더/하위 폴더 구조)
+    # self-referential 관계 (폴더/하위 폴더 구조)
     parent = relationship(
         "Bundle",
         remote_side=[id],

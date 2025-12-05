@@ -8,12 +8,13 @@ from pydantic import BaseModel
 
 
 # --- 요청용 (POST /bundles/) ---
+# 👉 이제 user_id는 토큰에서 current_user로 가져오니까
+#    여기에는 절대 안 넣는다.
 class BundleCreate(BaseModel):
-    user_id: UUID           # "1111-..." → UUID로 파싱됨
     name: str
-    description: Optional[str] = None
-    color: Optional[str] = None
-    icon: Optional[str] = None
+    description: Optional[str] = ""
+    color: Optional[str] = "#4F46E5"
+    icon: Optional[str] = "📁"
     parent_id: Optional[UUID] = None   # 상위 번들 (트리 구조용, 없어도 됨)
 
 

@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict
 
 
 class MemoryFromBlockCreate(BaseModel):
-    user_id: UUID
     original_text: str
     title: Optional[str] = None
 

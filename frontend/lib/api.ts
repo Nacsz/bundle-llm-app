@@ -4,10 +4,6 @@
 // 공통 API base URL
 // -------------------
 
-// .env.local 에서 지정한 API 베이스 URL만 사용한다.
-// 예)
-//   NEXT_PUBLIC_API_BASE=https://nacsiz.xyz/api
-//   NEXT_PUBLIC_API_BASE=http://localhost:8000
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "");
 
 export function getApiBase() {
@@ -33,19 +29,49 @@ export function debugApiBase() {
   }
 }
 
+// -------------------
+// 토큰 헬퍼
+// -------------------
+
+// 브라우저에서 로컬스토리지에 저장한 access_token 읽기
+function getAccessToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("access_token");
+  } catch {
+    return null;
+  }
+}
+
+// -------------------
 // 공통 fetch 래퍼
+// -------------------
+
 async function apiFetch(path: string, options?: RequestInit) {
   const base = getApiBase();
   const url = `${base}${path}`;
 
   console.log("API request:", url, options?.method || "GET");
 
+  const headers = new Headers(options?.headers || {});
+
+  // body가 JSON일 때만 Content-Type 기본값 세팅
+  if (
+    !headers.has("Content-Type") &&
+    !(options && options.body instanceof FormData)
+  ) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  // 🔒 JWT 토큰이 있으면 Authorization 헤더 추가
+  const token = getAccessToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
   const res = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {}),
-    },
+    headers,
   });
 
   if (!res.ok) {
@@ -79,11 +105,11 @@ export type MemoryItem = import("./types").MemoryItem;
 // -------------------
 
 type SendChatPayload = {
-  user_id: string;
+  user_id: string; // 백엔드가 실제로는 무시해도 되지만, 기존 스키마 때문에 유지
   message: string;
   selected_bundle_ids: string[];
   history: ChatMessage[];
-  selected_memory_ids?: string[];
+  selected_memory_ids?: string[]; // ✅ 체크된 메모 id 배열
 };
 
 export async function sendChat(
@@ -106,10 +132,9 @@ export async function sendChat(
 // 2) /bundles 목록 조회
 // -------------------
 
-export async function fetchBundles(userId: string) {
-  const params = new URLSearchParams({ user_id: userId });
-
-  const res = await apiFetch(`/bundles/?${params.toString()}`, {
+export async function fetchBundles(_userId: string) {
+  // 이제 userId는 사용하지 않고, 토큰에서 유저를 식별
+  const res = await apiFetch(`/bundles/`, {
     method: "GET",
     cache: "no-store",
   });
@@ -143,7 +168,7 @@ export async function fetchMemoriesForBundle(
 // -------------------
 
 type SaveMemoryPayload = {
-  user_id: string;
+  user_id: string; // 백엔드에서 실제로는 current_user.id 사용
   original_text: string;
   title?: string;
   metadata?: Record<string, any>;
@@ -166,7 +191,6 @@ export async function saveMemoryToBundle(
 // -------------------
 
 export async function createBundle(params: {
-  user_id: string;
   name: string;
   description?: string;
   color?: string;
@@ -174,7 +198,6 @@ export async function createBundle(params: {
   parent_id?: string | null;
 }) {
   const body = {
-    user_id: params.user_id,
     name: params.name,
     description: params.description ?? "",
     color: params.color ?? "#4F46E5",
@@ -253,4 +276,81 @@ export async function deleteMemoryInBundle(
   });
 
   return await res.json();
+}
+
+// -------------------
+// 8) Auth API
+// -------------------
+
+export function setAccessToken(token: string) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem("access_token", token);
+  } catch {
+    // ignore
+  }
+}
+
+export function clearAccessToken() {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem("access_token");
+  } catch {
+    // ignore
+  }
+}
+
+type LoginResponse = {
+  access_token: string;
+  token_type: string;
+  user: {
+    id: string;
+    email: string;
+    username?: string | null;
+  };
+};
+
+// 로그인
+export async function login(
+  email: string,
+  password: string,
+): Promise<LoginResponse> {
+  const res = await apiFetch("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+
+  return (await res.json()) as LoginResponse;
+}
+
+// 회원가입
+export async function register(params: {
+  email: string;
+  username?: string;
+  password: string;
+}): Promise<LoginResponse> {
+  const res = await apiFetch("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({
+      email: params.email,
+      username: params.username,
+      password: params.password,
+    }),
+  });
+
+  const user = await res.json();
+  return {
+    access_token: "",
+    token_type: "bearer",
+    user,
+  };
+}
+
+// 내 정보 조회 (토큰 필요)
+export async function fetchMe() {
+  const res = await apiFetch("/auth/me", {
+    method: "GET",
+    cache: "no-store",
+  });
+  return res.json();
 }

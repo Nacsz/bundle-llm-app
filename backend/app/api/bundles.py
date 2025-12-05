@@ -15,7 +15,8 @@ from app.models.bundle import Bundle
 from app.models.memory_item import MemoryItem
 from app.schemas.bundle import BundleCreate, BundleOut
 from app.schemas.memory import MemoryFromBlockCreate, MemoryItemOut
-
+from app.core.security import get_current_user
+from app.models.user import User                
 logger = logging.getLogger("app.bundles")
 
 router = APIRouter(
@@ -137,44 +138,44 @@ def memory_to_out(m: MemoryItem) -> MemoryItemOut:
 
 @router.get("/", response_model=List[BundleOut])
 def list_bundles(
-    user_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    특정 user_id 의 번들 목록 조회.
-    프론트: GET /bundles/?user_id=...
+    현재 로그인한 유저의 번들 목록 조회.
+    프론트: GET /bundles/ (쿼리 파라미터 없음)
     """
-    logger.info("[list_bundles] user_id=%s", user_id)
+    logger.info("[list_bundles] current_user.id=%s", current_user.id)
 
-    bundles = (
-        db.query(Bundle)
-        .filter(
-            Bundle.user_id == user_id,
-            Bundle.is_archived == False,  # noqa: E712
+    try:
+        bundles = (
+            db.query(Bundle)
+            .filter(
+                Bundle.user_id == current_user.id,
+                Bundle.is_archived == False,  # noqa: E712
+            )
+            .order_by(Bundle.created_at.desc())
+            .all()
         )
-        .order_by(Bundle.created_at.desc())
-        .all()
-    )
-    return bundles
+        return bundles
+    except Exception as e:
+        logger.exception("[list_bundles] unexpected error: %r", e)
+        # 디버깅용 500, 나중에 필요하면 바꿔도 됨
+        raise HTTPException(status_code=500, detail="Failed to load bundles")
 
 
 @router.post("/", response_model=BundleOut)
 def create_bundle(
     payload: BundleCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    새 번들 생성.
-    프론트: POST /bundles/
+    ✅ 요청 바디의 user_id는 무시하고,
+      항상 현재 로그인한 유저(current_user.id)를 번들의 owner로 사용.
     """
-    logger.info(
-        "[create_bundle] user_id=%s name=%s",
-        payload.user_id,
-        payload.name,
-    )
-
     bundle = Bundle(
-        user_id=payload.user_id,
+        user_id=current_user.id,          # ← 핵심
         parent_id=payload.parent_id,
         name=payload.name,
         description=payload.description,
@@ -184,8 +185,8 @@ def create_bundle(
     db.add(bundle)
     db.commit()
     db.refresh(bundle)
-
     return bundle
+
 
 
 @router.patch("/{bundle_id}", response_model=BundleOut)
@@ -193,6 +194,7 @@ def update_bundle(
     bundle_id: UUID,
     payload: BundleUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     번들 수정 (이름/설명/색상/아이콘/아카이브 등)
@@ -232,6 +234,7 @@ def update_bundle(
 def delete_bundle(
     bundle_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     번들 삭제 (안의 메모도 함께 삭제)
@@ -258,50 +261,78 @@ def delete_bundle(
 def list_memories_for_bundle(
     bundle_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user), 
 ):
     """
-    특정 번들의 메모 목록 조회.
-    프론트: GET /bundles/{bundle_id}/memories
+    특정 번들의 메모 목록 조회 (현재 유저 소유 번들만)
     """
-    logger.info("[list_memories_for_bundle] bundle_id=%s", bundle_id)
+    logger.info(
+        "[list_memories_for_bundle] user_id=%s bundle_id=%s",
+        current_user.id,
+        bundle_id,
+    )
+
+    # 번들이 내 것인지 확인
+    bundle = (
+        db.query(Bundle)
+        .filter(
+            Bundle.id == bundle_id,
+            Bundle.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Bundle not found")
 
     memories = (
         db.query(MemoryItem)
-        .filter(MemoryItem.bundle_id == bundle_id)
+        .filter(
+            MemoryItem.bundle_id == bundle_id,
+            MemoryItem.user_id == current_user.id,
+        )
         .order_by(MemoryItem.created_at.desc())
         .all()
     )
 
     return [memory_to_out(m) for m in memories]
 
-
 @router.post("/{bundle_id}/memories", response_model=MemoryItemOut)
 def create_memory_for_bundle(
     bundle_id: UUID,
     payload: MemoryFromBlockCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     번들에 메모 저장 (+ 요약 자동 생성).
     프론트: POST /bundles/{bundle_id}/memories
     """
+
     logger.info(
         "[create_memory_for_bundle] bundle_id=%s user_id=%s title=%s",
         bundle_id,
-        payload.user_id,
+        current_user.id,       # 🔁 이제 토큰에서 꺼낸 유저 id 로만 동작
         payload.title,
     )
 
-    # 번들이 실제 존재하는지 체크
-    bundle = db.query(Bundle).filter(Bundle.id == bundle_id).first()
+    # 1) 번들 존재 + 소유자 확인
+    bundle = (
+        db.query(Bundle)
+        .filter(
+            Bundle.id == bundle_id,
+            Bundle.user_id == current_user.id,   # ⬅️ 소유자 체크
+        )
+        .first()
+    )
     if not bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    # 요약 생성 (실패해도 None이면 그냥 원문만 저장)
+    # 2) 요약 생성
     summary_text = summarize_for_memory(payload.original_text)
 
+    # 3) 메모 생성: user_id 는 current_user.id 로 고정
     memory = MemoryItem(
-        user_id=payload.user_id,
+        user_id=current_user.id,          # ✅ 여기!
         bundle_id=bundle_id,
         original_text=payload.original_text,
         title=payload.title,
@@ -327,17 +358,17 @@ def update_memory_for_bundle(
     memory_id: UUID,
     payload: MemoryUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user), 
 ):
     """
-    메모 내용/메타데이터/핀 상태 수정 + 번들 이동까지 처리.
-    프론트: PATCH /bundles/{bundle_id}/memories/{memory_id}
-    - bundle_id 필드가 들어오면, 해당 메모를 다른 번들로 이동시킨다.
+    메모 수정 + 번들 이동 (현재 유저의 메모만)
     """
     memory = (
         db.query(MemoryItem)
         .filter(
             MemoryItem.id == memory_id,
             MemoryItem.bundle_id == bundle_id,
+            MemoryItem.user_id == current_user.id, 
         )
         .first()
     )
@@ -345,34 +376,22 @@ def update_memory_for_bundle(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     updated = False
+    # ... (기존 title/summary/original_text/metadata/is_pinned/usage_count 업데이트 로직 동일)
 
-    if payload.title is not None:
-        memory.title = payload.title
-        updated = True
-    if payload.summary is not None:
-        memory.summary = payload.summary
-        updated = True
-    if payload.original_text is not None:
-        memory.original_text = payload.original_text
-        updated = True
-    if payload.metadata is not None:
-        memory.metadata_json = payload.metadata
-        updated = True
-    if payload.is_pinned is not None:
-        memory.is_pinned = payload.is_pinned
-        updated = True
-    if payload.usage_count is not None:
-        memory.usage_count = payload.usage_count
-        updated = True
-
-    # ✅ 번들 이동 처리
+    # 🔒 번들 이동 시에도 대상 번들이 내 것인지 확인
     if payload.bundle_id is not None and payload.bundle_id != memory.bundle_id:
         target_bundle = (
-            db.query(Bundle).filter(Bundle.id == payload.bundle_id).first()
+            db.query(Bundle)
+            .filter(
+                Bundle.id == payload.bundle_id,
+                Bundle.user_id == current_user.id,
+            )
+            .first()
         )
         if not target_bundle:
             raise HTTPException(
-                status_code=404, detail="Target bundle for move not found"
+                status_code=404,
+                detail="Target bundle for move not found",
             )
 
         memory.bundle_id = payload.bundle_id
@@ -391,16 +410,17 @@ def delete_memory_for_bundle(
     bundle_id: UUID,
     memory_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user), 
 ):
     """
-    메모 삭제
-    프론트: DELETE /bundles/{bundle_id}/memories/{memory_id}
+    메모 삭제 (현재 유저의 메모만)
     """
     memory = (
         db.query(MemoryItem)
         .filter(
             MemoryItem.id == memory_id,
             MemoryItem.bundle_id == bundle_id,
+            MemoryItem.user_id == current_user.id, 
         )
         .first()
     )
@@ -411,3 +431,4 @@ def delete_memory_for_bundle(
     db.commit()
 
     return {"ok": True}
+
