@@ -1,7 +1,7 @@
 // frontend/app/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, FormEvent } from "react";
 import type { Bundle, ChatMessage, MemoryItem } from "@/lib/types";
 import {
   debugApiBase,
@@ -19,6 +19,8 @@ import {
   setAccessToken,
   clearAccessToken,
   fetchMe,
+  setUserOpenAIKey,
+  setSharedApiPassword,
 } from "@/lib/api";
 import { ChatWindow } from "@/components/ChatWindow";
 import { BundlePanel } from "@/components/BundlePanel";
@@ -41,7 +43,7 @@ export default function HomePage() {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-
+  
   // -----------------------------
   // 번들/메모/채팅 상태
   // -----------------------------
@@ -72,13 +74,33 @@ export default function HomePage() {
 
   // 자동 메모 저장 ON/OFF
   const [autoSaveToBundle, setAutoSaveToBundle] = useState(false);
+  
+  // OpenAI 설정 (개인 키 / 테스트용 비밀번호)
+  const [openAiInput, setOpenAiInput] = useState("");
+  const [openAiStatus, setOpenAiStatus] = useState<string>("");
 
   // "현재 번들"은 마지막으로 펼친 번들 기준
   const currentBundleId =
     expandedBundleIds.length > 0
       ? expandedBundleIds[expandedBundleIds.length - 1]
       : null;
+  const getDescendantBundleIds = (rootId: string): string[] => {
+    const result: string[] = [rootId];
+    const stack: string[] = [rootId];
 
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      const children = bundles.filter(
+        (b) => (b.parent_id ?? null) === current,
+      );
+      for (const child of children) {
+        result.push(child.id);
+        stack.push(child.id);
+      }
+    }
+
+    return result;
+  };
   // -----------------------------
   // 최초 로딩: API base + 토큰으로 자동 로그인
   // -----------------------------
@@ -99,6 +121,23 @@ export default function HomePage() {
       } catch (err) {
         console.log("[init] not logged in or fetchMe failed", err);
       }
+
+      // � OpenAI 설정 상태 텍스트 업데이트
+      if (typeof window !== "undefined") {
+        try {
+          const userKey = localStorage.getItem("user_openai_key");
+          const sharedPw = localStorage.getItem("shared_api_password");
+          if (userKey) {
+            setOpenAiStatus("개인 OpenAI API 키 사용 중");
+          } else if (sharedPw) {
+            setOpenAiStatus("공용(교수 평가용) API 사용 요청 중");
+          } else {
+            setOpenAiStatus("OpenAI 키 미설정 (echo 모드)");
+          }
+        } catch {
+          setOpenAiStatus("OpenAI 키 상태 확인 실패");
+        }
+      }
     };
     void init();
   }, []);
@@ -106,7 +145,7 @@ export default function HomePage() {
   // -----------------------------
   // 로그인 / 회원가입 핸들러
   // -----------------------------
-  const handleAuthSubmit = async (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setAuthError(null);
     setAuthLoading(true);
@@ -167,6 +206,40 @@ export default function HomePage() {
     setExpandedBundleIds([]);
     setLastMemoryContext(null);
   };
+    const handleSaveOpenAiConfig = () => {
+    const value = openAiInput.trim();
+
+    if (!value) {
+      // 초기화
+      setUserOpenAIKey(null);
+      setSharedApiPassword(null);
+      setOpenAiStatus("OpenAI 키 미설정 (echo 모드)");
+      window.alert("OpenAI 설정을 초기화했습니다. (echo 모드로 동작)");
+      setOpenAiInput("");
+      return;
+    }
+
+    if (value.startsWith("sk-")) {
+      // 개인 키 모드
+      setUserOpenAIKey(value);
+      setSharedApiPassword(null);
+      setOpenAiStatus("개인 OpenAI API 키 사용 중");
+      window.alert(
+        "개인 OpenAI API 키가 저장되었습니다.\n브라우저 localStorage에만 저장됩니다.",
+      );
+      setOpenAiInput("");
+      return;
+    }
+
+    // 그 밖의 값은 "교수 평가용 비밀번호"로 취급
+    setUserOpenAIKey(null);
+    setSharedApiPassword(value);
+    setOpenAiStatus("공용(평가용) API 사용 요청 중");
+    window.alert(
+      "평가용 비밀번호가 저장되었습니다.\n서버에 설정된 비밀번호와 일치할 경우 공용 API 키를 사용합니다.",
+    );
+    setOpenAiInput("");
+  };
 
   // -----------------------------
   // 특정 번들의 메모 로드
@@ -199,50 +272,124 @@ export default function HomePage() {
     void loadBundleMemories(bundleId);
   };
 
-  // 번들 체크박스: 이 번들의 메모 전체 선택/해제 + 펼치기
+  // 번들 체크박스: 이 번들과 모든 하위 번들의 메모 전체 선택/해제
   const handleToggleBundleSelectAll = (bundleId: string) => {
-    setExpandedBundleIds((prev) =>
-      prev.includes(bundleId) ? prev : [...prev, bundleId],
-    );
+    const targetBundleIds = getDescendantBundleIds(bundleId);
 
-    const mems = bundleMemories[bundleId];
-    if (!mems || mems.length === 0) {
-      void (async () => {
-        const items = await fetchMemoriesForBundle(bundleId);
-        setBundleMemories((prev) => ({ ...prev, [bundleId]: items }));
-        if (items.length === 0) return;
+    void (async () => {
+      // 1) 관련 번들의 메모를 모두 로딩 (아직 안 불러온 번들은 fetch)
+      const newlyLoaded: Record<string, MemoryItem[]> = {};
+      const allMemories: MemoryItem[] = [];
 
-        setSelectedMemoryIds((prev) => {
-          const idsInBundle = items.map((m) => m.id);
-          const allSelected = idsInBundle.every((id) => prev.includes(id));
-          if (allSelected) {
-            return prev.filter((id) => !idsInBundle.includes(id));
-          }
-          const set = new Set(prev);
-          idsInBundle.forEach((id) => set.add(id));
-          return Array.from(set);
-        });
-      })();
-      return;
+      for (const bId of targetBundleIds) {
+        let mems = bundleMemories[bId];
+
+        if (!mems) {
+          const items = await fetchMemoriesForBundle(bId);
+          mems = items;
+          newlyLoaded[bId] = items;
+        }
+
+        if (mems && mems.length > 0) {
+          allMemories.push(...mems);
+        }
+      }
+
+      // 로딩된 메모들 상태 반영
+      if (Object.keys(newlyLoaded).length > 0) {
+        setBundleMemories((prev) => ({ ...prev, ...newlyLoaded }));
+      }
+
+      // 이 트리에 메모가 하나도 없으면 아무 일도 안 함
+      if (allMemories.length === 0) return;
+
+      const allIds = allMemories.map((m) => m.id);
+
+      // 2) 이미 전부 선택되어 있으면 → 전부 해제, 아니면 → 전부 선택
+      setSelectedMemoryIds((prev) => {
+        const allSelected = allIds.every((id) => prev.includes(id));
+
+        if (allSelected) {
+          // 해제
+          return prev.filter((id) => !allIds.includes(id));
+        }
+
+        // 선택
+        const set = new Set(prev);
+        allIds.forEach((id) => set.add(id));
+        return Array.from(set);
+      });
+    })();
+  };
+
+    // � 모든 번들의 메모 전체 선택 / 해제
+  const handleToggleAllBundlesSelect = () => {
+    void (async () => {
+      if (bundles.length === 0) return;
+
+      const newlyLoaded: Record<string, MemoryItem[]> = {};
+      const allMems: MemoryItem[] = [];
+
+      // 모든 번들에 대해 메모 로딩 & 수집
+      for (const b of bundles) {
+        let mems = bundleMemories[b.id];
+
+        if (!mems) {
+          const items = await fetchMemoriesForBundle(b.id);
+          mems = items;
+          newlyLoaded[b.id] = items;
+        }
+
+        if (mems && mems.length > 0) {
+          allMems.push(...mems);
+        }
+      }
+
+      // 새로 로드한 메모를 상태에 반영
+      if (Object.keys(newlyLoaded).length > 0) {
+        setBundleMemories((prev) => ({ ...prev, ...newlyLoaded }));
+      }
+
+      if (allMems.length === 0) return;
+
+      const allIds = allMems.map((m) => m.id);
+
+      // 이미 전부 선택되어 있으면 → 해제, 아니면 → 전부 선택
+      setSelectedMemoryIds((prev) => {
+        const allSelected = allIds.every((id) => prev.includes(id));
+
+        if (allSelected) {
+          // 전체 해제
+          return prev.filter((id) => !allIds.includes(id));
+        }
+
+        // 전체 선택
+        const set = new Set(prev);
+        allIds.forEach((id) => set.add(id));
+        return Array.from(set);
+      });
+    })();
+  };
+
+
+      const isBundleFullySelected = (bundleId: string): boolean => {
+    const targetBundleIds = getDescendantBundleIds(bundleId);
+
+    const allMems: MemoryItem[] = [];
+    for (const bId of targetBundleIds) {
+      const mems = bundleMemories[bId];
+      if (mems && mems.length > 0) {
+        allMems.push(...mems);
+      }
     }
 
-    setSelectedMemoryIds((prev) => {
-      const idsInBundle = mems.map((m) => m.id);
-      const allSelected = idsInBundle.every((id) => prev.includes(id));
-      if (allSelected) {
-        return prev.filter((id) => !idsInBundle.includes(id));
-      }
-      const set = new Set(prev);
-      idsInBundle.forEach((id) => set.add(id));
-      return Array.from(set);
-    });
+    if (allMems.length === 0) return false;
+
+    // 이 번들 트리 안에 있는 모든 메모가 selectedMemoryIds 에 포함되어 있으면 true
+    return allMems.every((m) => selectedMemoryIds.includes(m.id));
   };
 
-  const isBundleFullySelected = (bundleId: string): boolean => {
-    const mems = bundleMemories[bundleId] ?? [];
-    if (mems.length === 0) return false;
-    return mems.every((m) => selectedMemoryIds.includes(m.id));
-  };
+
 
   const getMemoriesForBundle = (bundleId: string): MemoryItem[] => {
     return bundleMemories[bundleId] ?? [];
@@ -250,6 +397,10 @@ export default function HomePage() {
 
   const isLoadingBundle = (bundleId: string): boolean => {
     return loadingBundles[bundleId] ?? false;
+  };
+
+  const isBundleMemoriesLoaded = (bundleId: string): boolean => {
+    return Object.prototype.hasOwnProperty.call(bundleMemories, bundleId);
   };
 
   const handleToggleMemorySelect = (memoryId: string) => {
@@ -261,14 +412,15 @@ export default function HomePage() {
   };
 
   // -----------------------------
-  // 채팅 보내기 (/chat)
+  // 채팅 보내기
+  //  (/chat에 선택된 메모 id만 보냄 + 자동 메모 저장)
   // -----------------------------
   const handleSendMessage = async (message: string) => {
+    if (!message.trim()) return;
     if (!currentUser) {
       window.alert("먼저 로그인 해주세요.");
       return;
     }
-    if (!message.trim()) return;
 
     const newUserMsg: ChatMessage = {
       role: "user",
@@ -282,10 +434,10 @@ export default function HomePage() {
 
     try {
       const res = await sendChat({
-        user_id: currentUser.id,
+        user_id: currentUser.id, // 지금은 백엔드가 토큰으로 유저를 알아서 찾아가니까 사실상 의미 없음
         message,
         history: historySlice,
-        selected_bundle_ids: [], // 지금은 메모 체크 방식만 사용
+        selected_bundle_ids: [], // 스키마 맞추기용
         selected_memory_ids: selectedMemoryIds,
       });
 
@@ -298,7 +450,15 @@ export default function HomePage() {
       setMessages(updatedMessages);
       setLastMemoryContext(res.memory_context);
 
-      // ----- 자동 메모 저장 -----
+      // � auto_route 에서 새 번들을 만들 수 있으니, 번들 목록 리프레시
+      try {
+        const latestBundles = await fetchBundles(currentUser.id);
+        setBundles(latestBundles);
+      } catch (err) {
+        console.warn("failed to refresh bundles after chat", err);
+      }
+
+      // ----- 자동 메모 저장 (현재 번들) -----
       if (autoSaveToBundle && currentBundleId) {
         try {
           const titleBase = message.trim();
@@ -356,7 +516,7 @@ export default function HomePage() {
         name: name.trim(),
         description: "",
         color: "#4F46E5",
-        icon: "📁",
+        icon: "�",
         parent_id: parentId ?? null,
       });
 
@@ -364,6 +524,22 @@ export default function HomePage() {
     } catch (err) {
       console.error("createBundle failed", err);
       window.alert("번들 생성 실패");
+    }
+  };
+
+    const handleMoveBundle = async (bundleId: string, newParentId: string) => {
+    try {
+      const updated = await updateBundle(bundleId, {
+        parent_id: newParentId,
+      });
+
+      // 상태에도 반영
+      setBundles((prev) =>
+        prev.map((b) => (b.id === bundleId ? updated : b)),
+      );
+    } catch (err) {
+      console.error("[handleMoveBundle] updateBundle failed", err);
+      window.alert("번들 이동 중 오류가 발생했습니다.");
     }
   };
 
@@ -569,6 +745,29 @@ export default function HomePage() {
     setTextToSave(joined);
   };
 
+
+  // -----------------------------
+  // 번들 트리 헬퍼: 특정 번들의 하위 번들까지 모두 모으기
+  // -----------------------------
+  const collectDescendantBundleIds = (rootId: string): string[] => {
+    const result: string[] = [];
+    const stack: string[] = [rootId];
+
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (!result.includes(id)) result.push(id);
+
+      bundles.forEach((b) => {
+        if (b.parent_id === id) {
+          stack.push(b.id);
+        }
+      });
+    }
+
+    return result;
+  };
+
+
   // -----------------------------
   // 로그인 화면 렌더링
   // -----------------------------
@@ -684,6 +883,36 @@ export default function HomePage() {
                 로그아웃
               </button>
             </div>
+            {/* OpenAI 설정 영역 */}
+            <div className="border-b border-gray-100 bg-slate-50 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-gray-700">
+                  OpenAI 설정
+                </span>
+                <span className="text-[10px] text-gray-500">
+                  sk-... 또는 평가 비밀번호
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  className="flex-1 rounded border border-gray-300 px-2 py-1 text-[11px]"
+                  placeholder="sk-로 시작하는 키 또는 평가용 비밀번호"
+                  value={openAiInput}
+                  onChange={(e) => setOpenAiInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveOpenAiConfig}
+                  className="rounded bg-indigo-600 px-2 py-1 text-[11px] text-white hover:bg-indigo-700"
+                >
+                  저장
+                </button>
+              </div>
+              <div className="mt-1 text-[10px] text-gray-600">
+                {openAiStatus || "OpenAI 키 미설정 (echo 모드)"}
+              </div>
+            </div>
 
             <div className="p-3">
               <h2 className="mb-2 text-sm font-semibold">Bundles</h2>
@@ -703,6 +932,9 @@ export default function HomePage() {
                 onUpdateMemoryContent={handleUpdateMemoryContent}
                 onDeleteMemory={handleDeleteMemory}
                 chatMessages={messages}
+                onMoveBundle={handleMoveBundle}
+                isBundleMemoriesLoaded={isBundleMemoriesLoaded}
+                onToggleSelectAllBundles={handleToggleAllBundlesSelect}
               />
             </div>
 
@@ -728,7 +960,7 @@ export default function HomePage() {
             isSidebarOpen ? "w-1/2" : "w-full"
           }`}
         >
-          <header className="flex items-center justify-between border-b border-gray-200 p-3">
+          <header className="flex items-center justify_between border-b border-gray-200 p-3">
             <h1 className="text-sm font-semibold">LLM Chat</h1>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-1 text-xs text-gray-600">

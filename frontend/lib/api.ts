@@ -4,7 +4,13 @@
 // 공통 API base URL
 // -------------------
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "");
+const rawBase =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  "";
+const API_BASE = rawBase.replace(/\/$/, "");
+
+// const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "");
 
 export function getApiBase() {
   if (!API_BASE) {
@@ -29,8 +35,14 @@ export function debugApiBase() {
   }
 }
 
+// 맨 위 타입들 근처에 추가
+export type AutoGroupCandidate = {
+  parent_name: string;
+  child_bundle_ids: string[]; // UUID string[]
+};
+
 // -------------------
-// 토큰 헬퍼
+// 토큰 / OpenAI 설정 헬퍼
 // -------------------
 
 // 브라우저에서 로컬스토리지에 저장한 access_token 읽기
@@ -40,6 +52,53 @@ function getAccessToken(): string | null {
     return localStorage.getItem("access_token");
   } catch {
     return null;
+  }
+}
+
+// � 브라우저에 저장된 개인 OpenAI API Key
+function getUserOpenAIKey(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("user_openai_key");
+  } catch {
+    return null;
+  }
+}
+
+// � 브라우저에 저장된 "교수 평가용 비밀번호"
+function getSharedApiPassword(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("shared_api_password");
+  } catch {
+    return null;
+  }
+}
+
+// 외부에서 사용할 수 있는 setter
+export function setUserOpenAIKey(key: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (!key) {
+      localStorage.removeItem("user_openai_key");
+    } else {
+      localStorage.setItem("user_openai_key", key);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function setSharedApiPassword(pw: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (!pw) {
+      localStorage.removeItem("shared_api_password");
+    } else {
+      localStorage.setItem("shared_api_password", pw);
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -63,10 +122,23 @@ async function apiFetch(path: string, options?: RequestInit) {
     headers.set("Content-Type", "application/json");
   }
 
-  // 🔒 JWT 토큰이 있으면 Authorization 헤더 추가
+  // � JWT 토큰이 있으면 Authorization 헤더 추가
   const token = getAccessToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  // � OpenAI 관련 헤더 처리
+  // 1순위: 개인 OpenAI API 키
+  const userKey = getUserOpenAIKey();
+  if (userKey) {
+    headers.set("X-OpenAI-Key", userKey);
+  } else {
+    // 2순위: 교수 평가용 비밀번호 (공용 서버 키 사용 허용)
+    const sharedPw = getSharedApiPassword();
+    if (sharedPw) {
+      headers.set("X-Shared-API-Password", sharedPw);
+    }
   }
 
   const res = await fetch(url, {
@@ -201,7 +273,7 @@ export async function createBundle(params: {
     name: params.name,
     description: params.description ?? "",
     color: params.color ?? "#4F46E5",
-    icon: params.icon ?? "📁",
+    icon: params.icon ?? "�",
     parent_id: params.parent_id ?? null,
   };
 
@@ -353,4 +425,32 @@ export async function fetchMe() {
     cache: "no-store",
   });
   return res.json();
+}
+
+// -------------------
+// 9) 번들 자동 그룹핑
+// -------------------
+
+// 번들 자동 정리 '미리보기'
+export async function previewAutoGroup(): Promise<AutoGroupCandidate[]> {
+  const res = await apiFetch("/bundles/auto-group/preview", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+  const data = await res.json();
+  return (data.groups ?? []) as AutoGroupCandidate[];
+}
+
+// 번들 자동 정리 '적용'
+export async function applyAutoGroup(
+  groups: AutoGroupCandidate[],
+): Promise<import("./types").Bundle[]> {
+  const res = await apiFetch("/bundles/auto-group/apply", {
+    method: "POST",
+    body: JSON.stringify({ groups }),
+  });
+
+  // 백엔드는 최신 번들 목록을 반환
+  return (await res.json()) as import("./types").Bundle[];
 }

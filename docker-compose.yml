@@ -32,8 +32,10 @@ services:
       # db.py에서 쓰는 DATABASE_URL (중요!)
       DATABASE_URL: postgresql+psycopg2://llm_user:llm_password@127.0.0.1:5432/llm_memory
 
-      # LLM 키 (루트 .env에서 가져오도록 구성)
+      # � LLM 서버 공용 키
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # � 테스트 전용 패스워드
+      SHARED_API_PASSWORD: ${SHARED_API_PASSWORD}
 
       # 필요하면 추가
       APP_ENV: ${APP_ENV}
@@ -58,6 +60,7 @@ services:
       # 브라우저에서 백엔드를 호출할 주소
       # 프론트 코드에서 process.env.NEXT_PUBLIC_API_BASE_URL 사용
       NEXT_PUBLIC_API_BASE_URL: "http://192.168.0.113:8000"
+      NEXT_PUBLIC_API_BASE: "https://nacsiz.xyz/api"
     volumes:
       - ./frontend:/app         # 코드 수정 → 바로 반영
       - /app/node_modules
