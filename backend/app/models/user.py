@@ -1,17 +1,35 @@
-# app/models/user.py
-from sqlalchemy import Column, String, Boolean, Text, TIMESTAMP
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
-from app.core.db import Base
+# backend/app/models/user.py
+
 import uuid
+from datetime import datetime
+
+from sqlalchemy import Column, String, Boolean, DateTime
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.db import Base
+
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    email = Column(String(255), unique=True, nullable=False)
-    username = Column(String(50))
-    hashed_password = Column(Text, nullable=False)
-    is_active = Column(Boolean, nullable=False, server_default="true")
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,   # DB의 gen_random_uuid()와 호환 가능
+        nullable=False,
+    )
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(50), nullable=True)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+    )

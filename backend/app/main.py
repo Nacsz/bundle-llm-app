@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import bundles, chat
+from app.api import bundles, chat, auth
 from app.core.db import init_db, Base, engine
 from app import models  # noqa: F401  # Base.metadata에 모델 등록용
 
@@ -49,6 +49,7 @@ async def options_chat() -> Response:
 # 라우터 등록
 app.include_router(bundles.router)
 app.include_router(chat.router)
+app.include_router(auth.router)
 
 
 @app.get("/health")
