@@ -35,7 +35,11 @@ else:
 MAX_HISTORY = 10
 # memory_context로 붙일 최대 메모 개수
 MAX_MEMORY_ITEMS = 8
+# memory_context 전체 길이 제한 (문자 기준)
+MAX_MEMORY_TOTAL_CHARS = 6000
 
+# 메모 하나당 최대 길이 (문자 기준)
+MAX_MEMORY_PER_ITEM_CHARS = 800
 
 # ----- Pydantic 모델 -----
 class ChatHistoryItem(BaseModel):
@@ -135,6 +139,7 @@ def build_memory_context(
 
         lines: List[str] = []
         used: List[UsedMemoryItem] = []
+        total_chars = 0
 
         for m in rows:
             title = getattr(m, "title", None)
@@ -142,15 +147,24 @@ def build_memory_context(
             original_text = getattr(m, "original_text", "")
 
             text_for_context = summary or original_text or ""
-            if len(text_for_context) > 200:
-                text_for_context = text_for_context[:200] + "..."
+            if len(text_for_context) > MAX_MEMORY_PER_ITEM_CHARS:
+                text_for_context = text_for_context[:MAX_MEMORY_PER_ITEM_CHARS] + "…"
 
-            if title:
-                line = f"- ({title}) {text_for_context}"
-            else:
-                line = f"- {text_for_context}"
+            # 전체 memory_context 길이 초과하면 더 이상 추가하지 않음
+            # (줄 앞에 "- (제목) " 같은 것까지 포함해서 대략 계산)
+            tentative_line = (
+                f"- ({title}) {text_for_context}"
+                if title
+                else f"- {text_for_context}"
+            )
 
-            lines.append(line)
+            if total_chars + len(tentative_line) > MAX_MEMORY_TOTAL_CHARS:
+                # 이 메모부터는 잘라야 하므로 반복 종료
+                break
+
+            total_chars += len(tentative_line)
+
+            lines.append(tentative_line)
 
             used.append(
                 UsedMemoryItem(
