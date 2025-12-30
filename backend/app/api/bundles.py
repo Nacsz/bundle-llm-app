@@ -121,6 +121,61 @@ def summarize_for_memory(
         logger.warning("[bundles] summarization failed: %r", e)
         return None
 
+def generate_memory_title(
+    original_text: str,
+    client: Optional[OpenAI],
+) -> str:
+    """
+    메모 제목용 짧은 키워드 생성.
+    - 가능하면 LLM으로 1줄짜리 짧은 제목 생성
+    - LLM이 없거나 실패하면 첫 줄 20자 정도 잘라서 사용
+    """
+    text = (original_text or "").strip()
+    if not text:
+        return "메모"
+
+    # LLM 없이도 돌아가도록 먼저 fallback 로직부터 정의
+    def simple_fallback() -> str:
+        first_line = text.splitlines()[0]
+        # "사용자:", "LLM:" 같은 접두어 제거
+        for prefix in ["사용자:", "User:", "LLM:", "Assistant:"]:
+            if first_line.startswith(prefix):
+                first_line = first_line[len(prefix) :].strip()
+        first_line = first_line or "메모"
+        return first_line[:20] + ("…" if len(first_line) > 20 else "")
+
+    # LLM 키 없으면 바로 fallback
+    if client is None:
+        return simple_fallback()
+
+    try:
+        prompt = (
+            "다음 전체 대화/텍스트의 내용을 대표하는 **아주 짧은 제목**을 만들어 주세요.\n"
+            "- 한국어로 1~6단어 정도\n"
+            "- 따옴표나 마침표 없이, 제목만 출력\n"
+            "- 예시: 인사, 중국 음식, 시험 계획, 프로젝트 회의 메모\n\n"
+            f"--- 내용 ---\n{text}\n"
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "너는 사용자의 메모에 붙일 짧은 제목을 만드는 비서야.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=32,
+            temperature=0.3,
+        )
+        title = (resp.choices[0].message.content or "").strip()
+        # 너무 길거나 이상하면 fallback
+        if not title or len(title) > 30:
+            return simple_fallback()
+        return title
+    except Exception as e:
+        logger.warning("[bundles] title generation failed: %r", e)
+        return simple_fallback()
 
 # -------------------------
 # Update/정리 Pydantic 모델
@@ -299,10 +354,11 @@ def delete_bundle(
     current_user: User = Depends(get_current_user),
 ):
     """
-    번들 삭제 (안의 메모도 함께 삭제)
+    번들 삭제 (하위 번들 + 그 안의 메모까지 모두 삭제)
     프론트: DELETE /bundles/{bundle_id}
     """
-    bundle = (
+    # 1) 우선 내가 소유한 번들인지 확인
+    root_bundle = (
         db.query(Bundle)
         .filter(
             Bundle.id == bundle_id,
@@ -310,25 +366,71 @@ def delete_bundle(
         )
         .first()
     )
-    if not bundle:
+    if not root_bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    db.query(MemoryItem).filter(MemoryItem.bundle_id == bundle_id).delete()
-    db.delete(bundle)
-    db.commit()
+    # 2) 나 + 모든 하위 번들의 id 수집 (DFS)
+    ids_to_delete: list[UUID] = []
+    stack: list[UUID] = [root_bundle.id]
 
-    return {"ok": True}
+    while stack:
+        cur = stack.pop()
+        if cur in ids_to_delete:
+            continue
+        ids_to_delete.append(cur)
 
+        children = (
+            db.query(Bundle)
+            .filter(
+                Bundle.user_id == current_user.id,
+                Bundle.parent_id == cur,
+            )
+            .all()
+        )
+        for child in children:
+            stack.append(child.id)
+
+    try:
+        if ids_to_delete:
+            # 3) 해당 번들들에 속한 메모 먼저 삭제
+            db.query(MemoryItem).filter(
+                MemoryItem.user_id == current_user.id,
+                MemoryItem.bundle_id.in_(ids_to_delete),
+            ).delete(synchronize_session=False)
+
+            # 4) 번들들 삭제
+            db.query(Bundle).filter(
+                Bundle.user_id == current_user.id,
+                Bundle.id.in_(ids_to_delete),
+            ).delete(synchronize_session=False)
+
+        db.commit()
+
+        logger.info(
+            "[delete_bundle] user_id=%s deleted_bundle_ids=%s",
+            current_user.id,
+            [str(bid) for bid in ids_to_delete],
+        )
+
+        return {
+          "ok": True,
+          "deleted_bundle_ids": [str(bid) for bid in ids_to_delete],
+        }
+    except Exception as e:
+        db.rollback()
+        logger.exception("[delete_bundle] failed: %r", e)
+        raise HTTPException(status_code=500, detail="Failed to delete bundle")
 
 # -------------------------
 # 번들 자동 정리 (그룹핑)
 # -------------------------
 
+
 @router.post("/auto-group/preview", response_model=AutoGroupPreviewResponse)
 async def preview_auto_group_bundles(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    # � 프론트에서 보내는 헤더 (없으면 None)
+    # 프론트에서 보내는 헤더 (개인 키 or 평가용 비밀번호)
     x_openai_api_key: Optional[str] = Header(None, alias="X-OpenAI-Api-Key"),
     x_shared_api_password: Optional[str] = Header(
         None, alias="X-Shared-Api-Password"
@@ -336,11 +438,12 @@ async def preview_auto_group_bundles(
 ):
     """
     번들 자동 정리 미리보기.
-    - 유저의 번들 목록을 불러오고
-    - 헤더/환경변수에서 OpenAI 클라이언트를 만들어 LLM에 묶어달라고 요청
-    - 클라이언트가 없거나 에러 나면 그냥 빈 groups 반환 (500 안 냄)
+
+    - 현재 유저의 번들을 전부 가져온 다음
+    - 헤더 / 환경변수에서 OpenAI 클라이언트를 만든 뒤
+    - LLM에게 "어떤 상위 번들로 묶을지"를 물어본다.
+    - 실패하거나 클라이언트가 없으면 500 내지 않고 groups 빈 배열 리턴.
     """
-    # 1) 현재 유저의 번들 가져오기
     bundles = (
         db.query(Bundle)
         .filter(
@@ -351,11 +454,11 @@ async def preview_auto_group_bundles(
         .all()
     )
 
+    # 번들이 너무 적으면 그냥 리턴
     if len(bundles) < 2:
-        # 묶을 게 없으면 바로 빈 결과
         return AutoGroupPreviewResponse(groups=[])
 
-    # 2) 헤더(개인 키 or 평가용 비밀번호) + 서버 환경변수로 OpenAI 클라이언트 만들기
+    # OpenAI 클라이언트 생성 (개인 키 / 평가용 비밀번호 + 서버 키)
     client = build_openai_client(x_openai_api_key, x_shared_api_password)
     if client is None:
         logger.warning(
@@ -366,15 +469,30 @@ async def preview_auto_group_bundles(
         )
         return AutoGroupPreviewResponse(groups=[])
 
-    # 3) LLM에 넘길 번들 목록 준비
+    # LLM에 넘길 번들 리스트 (이름 기준으로 묶게 시킴)
     items = [{"id": str(b.id), "name": b.name} for b in bundles]
     items_json = json.dumps(items, ensure_ascii=False)
+
+    system_msg = (
+        "당신은 사용자의 '번들(폴더)' 이름을 보고, 의미적으로 비슷한 번들을 "
+        "상위 카테고리로 묶어 주는 도우미입니다. "
+        "반드시 JSON 객체 하나만 출력하고, 설명 문장은 쓰지 마세요."
+    )
 
     prompt = f"""
 다음은 사용자가 만든 '번들(폴더)' 목록이야.
 비슷한 것끼리 상위 카테고리를 만들어서 묶어줘.
 
-반드시 JSON 한 줄만 출력해. 형식은 정확히 아래와 같아.
+규칙:
+- 각 그룹은 다음 필드를 가진다.
+  - parent_name: 새로 만들 상위 번들 이름 (한국어 4~12자 정도의 명사구)
+  - children: 이 그룹에 넣을 기존 번들의 '이름' 문자열 리스트
+- parent_name 에는 "사용자:", "LLM:" 과 같은 말하는 사람 접두어나
+  이모지, 불필요한 기호를 넣지 마.
+- 콜론(:) 으로 끝나지 않게 해.
+- 애매하면 그룹을 만들지 말고, 소수의 그룹만 만들어.
+
+반환 형식은 반드시 아래 JSON 예시와 같은 형태로, JSON 객체 한 개만 출력해.
 
 {{
   "groups": [
@@ -390,21 +508,16 @@ async def preview_auto_group_bundles(
 }}
 
 설명 문장은 절대 쓰지 말고, 위 형식의 JSON 객체 하나만 출력해.
-번들 목록은 아래와 같아.
 
 번들 목록:
 {items_json}
 """
 
-    # 4) LLM 호출 + JSON 파싱
     try:
         resp = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": "너는 사용자의 번들 이름을 보고 상위 카테고리로 묶어 주는 도우미야. 반드시 JSON 객체만 출력해.",
-                },
+                {"role": "system", "content": system_msg},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=512,
@@ -415,10 +528,10 @@ async def preview_auto_group_bundles(
         obj = json.loads(raw)
     except Exception as e:
         logger.exception("[auto_group_preview] LLM call or JSON parse failed: %r", e)
-        # LLM 쪽에서 뻗어도 500 안 내고 조용히 빈 결과
+        # LLM 에러나 JSON 파싱 실패해도 500 안 내고 빈 결과
         return AutoGroupPreviewResponse(groups=[])
 
-    # 5) 번들 이름 → id 매핑해서 AutoGroupCandidate 리스트로 변환
+    # 번들 "이름" → id 리스트 매핑 (같은 이름 여러 개 대비)
     name_to_ids: Dict[str, List[str]] = {}
     for b in bundles:
         name_to_ids.setdefault(b.name, []).append(str(b.id))
@@ -442,6 +555,7 @@ async def preview_auto_group_bundles(
                 # 같은 이름 번들이 여러 개 있을 수도 있으니 전부 추가
                 child_bundle_ids.extend(name_to_ids.get(cname_str, []))
 
+            # 실제로 매핑된 번들이 있어야 유효 그룹
             if not child_bundle_ids:
                 continue
 
@@ -475,7 +589,6 @@ def apply_auto_group(
     1) parent_name 으로 새 번들을 만들고,
     2) child_bundle_ids 에 해당하는 기존 번들의 parent_id 를 새 번들로 설정한다.
     """
-
     logger.info(
         "[apply_auto_group] user_id=%s groups=%s",
         current_user.id,
@@ -496,8 +609,7 @@ def apply_auto_group(
         return bundles
 
     try:
-        # 1) child id 들 → 실제 번들 객체 캐시
-        #    (여러 그룹에서 같은 번들을 중복으로 지정해도 마지막 지정이 이김)
+        # child id 들 → 실제 번들 객체 캐시
         bundle_map: dict[UUID, Bundle] = {}
 
         all_child_ids: List[UUID] = []
@@ -520,13 +632,13 @@ def apply_auto_group(
             for b in existing_children:
                 bundle_map[b.id] = b
 
-        # 2) 그룹별로 새 parent 번들 만들고, child.parent_id 업데이트
+        # 그룹별로 새 parent 번들 만들고, child.parent_id 업데이트
         for g in payload.groups:
             parent_name = g.parent_name.strip()
             if not parent_name:
                 continue
 
-            # 이미 같은 이름의 상위 번들이 있는지 가볍게 확인 (선택사항)
+            # 이미 같은 이름의 상위 번들이 있는지 확인 (선택 사항)
             existing_parent = (
                 db.query(Bundle)
                 .filter(
@@ -551,18 +663,20 @@ def apply_auto_group(
                 db.add(parent_bundle)
                 db.flush()  # id 확보용
 
-            # child 들 parent_id 설정
             for cid_str in g.child_bundle_ids:
                 try:
                     cid = UUID(cid_str)
                 except Exception:
-                    logger.warning("[apply_auto_group] skip invalid child id=%s", cid_str)
+                    logger.warning(
+                        "[apply_auto_group] skip invalid child id=%s", cid_str
+                    )
                     continue
 
                 child = bundle_map.get(cid)
                 if not child:
-                    # 내 소유가 아니거나 없는 번들
-                    logger.warning("[apply_auto_group] child bundle not found: %s", cid)
+                    logger.warning(
+                        "[apply_auto_group] child bundle not found: %s", cid
+                    )
                     continue
 
                 child.parent_id = parent_bundle.id
@@ -570,7 +684,7 @@ def apply_auto_group(
 
         db.commit()
 
-        # 3) 최종 번들 목록 반환 (프론트에서 setBundles 로 갈아끼우기 용)
+        # 최종 번들 목록 반환
         bundles = (
             db.query(Bundle)
             .filter(
@@ -665,21 +779,30 @@ def create_memory_for_bundle(
     if not bundle:
         raise HTTPException(status_code=404, detail="Bundle not found")
 
-    # 2) OpenAI 클라이언트 생성 후 요약
+        # 2) OpenAI 클라이언트 생성 후 요약
     client = build_openai_client(x_openai_key, x_shared_api_password)
     summary_text = summarize_for_memory(payload.original_text, client)
+
+    # 2-1) 제목 정리: 너무 길거나 비어 있으면 자동 생성
+    raw_title = (payload.title or "").strip() if hasattr(payload, "title") else ""
+    if not raw_title or len(raw_title) > 40:
+        # 프론트에서 대화 전체를 title로 보내더라도 무시하고 새로 만듦
+        title_for_memory = generate_memory_title(payload.original_text, client)
+    else:
+        title_for_memory = raw_title
 
     # 3) 메모 생성
     memory = MemoryItem(
         user_id=current_user.id,
         bundle_id=bundle_id,
         original_text=payload.original_text,
-        title=payload.title,
+        title=title_for_memory,
         summary=summary_text,
         source_type=payload.source_type,
         source_id=payload.source_id,
         metadata_json=payload.metadata or {},
     )
+
 
     db.add(memory)
     db.commit()
@@ -790,179 +913,3 @@ def delete_memory_for_bundle(
 
     return {"ok": True}
 
-# app/api/bundles.py (파일 맨 아래쪽에 추가 / 기존 자동정리 엔드포인트가 있으면 이걸로 교체)
-
-@router.post("/auto-group/preview", response_model=AutoGroupPreviewResponse)
-def auto_group_preview(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    번들 이름들만 가지고 LLM에게 '어떤 상위 번들로 묶으면 좋을지' 물어보고,
-    { parent_name, child_bundle_ids[] } 리스트를 돌려준다.
-    - 실패해도 500 안 내고 그냥 groups 빈 리스트로 응답.
-    """
-    # 1) 현재 유저 번들 전체 로드
-    bundles = (
-        db.query(Bundle)
-        .filter(
-            Bundle.user_id == current_user.id,
-            Bundle.is_archived == False,  # noqa: E712
-        )
-        .order_by(Bundle.created_at.asc())
-        .all()
-    )
-
-    # 번들이 너무 적거나, LLM 클라이언트가 없으면 그냥 빈 그룹
-    if len(bundles) < 2 or llm_client is None:
-        return AutoGroupPreviewResponse(groups=[])
-
-    id_to_name = {str(b.id): b.name for b in bundles}
-
-    # 프롬프트 만들기
-    system_msg = (
-        "당신은 사용자의 '번들(폴더)' 이름 목록을 보고, 의미적으로 비슷한 것끼리 "
-        "상위 그룹으로 묶어주는 비서입니다."
-    )
-
-    lines = [f"- {b.id}: {b.name}" for b in bundles]
-    user_prompt = (
-        "다음은 사용자가 만든 번들의 ID와 이름 목록입니다.\n"
-        "서로 의미적으로 관련 있는 번들들을 몇 개의 상위 그룹으로 묶어 주세요.\n\n"
-        "규칙:\n"
-        "- 각 그룹은 'parent_name'(새로 만들 상위 번들 이름)과 "
-        "'child_bundle_ids'(이 그룹에 넣을 기존 번들의 ID 문자열 리스트)로 구성됩니다.\n"
-        "- child_bundle_ids 에는 최소 2개 이상의 ID가 들어가야 합니다.\n"
-        "- 가능한 한 소수의 그룹만 만들고, 애매하면 그룹을 만들지 마세요.\n\n"
-        "반환 형식은 다음 JSON 하나만 출력하세요.\n"
-        '{\"groups\":[{\"parent_name\":\"string\",\"child_bundle_ids\":[\"id1\",\"id2\"]}]}\n\n'
-        "번들 목록:\n"
-        + "\n".join(lines)
-    )
-
-    try:
-        resp = llm_client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=512,
-        )
-
-        content = (resp.choices[0].message.content or "").strip()
-        data = json.loads(content)
-        raw_groups = data.get("groups") or []
-
-        groups: List[AutoGroupCandidate] = []
-        seen_children: set[str] = set()
-
-        for g in raw_groups:
-            parent_name = str(g.get("parent_name") or "").strip()
-            child_ids_raw = g.get("child_bundle_ids") or []
-            if not parent_name or not isinstance(child_ids_raw, list):
-                continue
-
-            child_ids: List[str] = []
-            for cid in child_ids_raw:
-                cid_str = str(cid)
-                # 실제로 존재하는 번들이고, 아직 다른 그룹에 안 들어간 것만 사용
-                if cid_str in id_to_name and cid_str not in seen_children:
-                    child_ids.append(cid_str)
-
-            # 최소 2개 이상일 때만 유효 그룹으로 인정
-            if len(child_ids) < 2:
-                continue
-
-            seen_children.update(child_ids)
-            groups.append(
-                AutoGroupCandidate(
-                    parent_name=parent_name,
-                    child_bundle_ids=child_ids,
-                )
-            )
-
-        logger.info(
-            "[auto_group_preview] user=%s groups=%d",
-            current_user.id,
-            len(groups),
-        )
-        return AutoGroupPreviewResponse(groups=groups)
-    except Exception as e:
-        logger.warning("[auto_group_preview] failed: %r", e)
-        # ❗ 실패해도 500 대신 그냥 빈 그룹 리턴
-        return AutoGroupPreviewResponse(groups=[])
-
-
-@router.post("/auto-group/apply", response_model=List[BundleOut])
-def auto_group_apply(
-    payload: AutoGroupApplyRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    프론트에서 확정한 groups 를 받아 실제로 부모 번들을 만들고
-    child 번들의 parent_id 를 그걸로 변경한다.
-    완료 후 최신 번들 목록을 반환.
-    """
-    # 현재 유저 번들 맵
-    existing_bundles = (
-        db.query(Bundle)
-        .filter(
-            Bundle.user_id == current_user.id,
-            Bundle.is_archived == False,  # noqa: E712
-        )
-        .all()
-    )
-    bundle_map: dict[str, Bundle] = {str(b.id): b for b in existing_bundles}
-
-    if not payload.groups:
-        # 아무 그룹도 없으면 그냥 현재 리스트만 반환
-        return (
-            db.query(Bundle)
-            .filter(
-                Bundle.user_id == current_user.id,
-                Bundle.is_archived == False,  # noqa: E712
-            )
-            .order_by(Bundle.created_at.desc())
-            .all()
-        )
-
-    for g in payload.groups:
-        if not g.child_bundle_ids:
-          continue
-
-        # 1) 상위 번들 생성
-        parent_bundle = Bundle(
-            user_id=current_user.id,
-            parent_id=None,
-            name=g.parent_name,
-            description=None,
-            color="#4F46E5",
-            icon="�",
-        )
-        db.add(parent_bundle)
-        db.flush()  # parent_bundle.id 확보
-
-        # 2) 자식 번들들의 parent_id 변경
-        for cid in g.child_bundle_ids:
-            child = bundle_map.get(str(cid))
-            if not child:
-                continue
-            child.parent_id = parent_bundle.id
-            db.add(child)
-
-    db.commit()
-
-    # 최신 번들 목록 다시 반환
-    bundles = (
-        db.query(Bundle)
-        .filter(
-            Bundle.user_id == current_user.id,
-            Bundle.is_archived == False,  # noqa: E712
-        )
-        .order_by(Bundle.created_at.desc())
-        .all()
-    )
-    return bundles

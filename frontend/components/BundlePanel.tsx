@@ -324,7 +324,7 @@ export function BundlePanel({
   };
   
   return (
-    <div className="flex h-full flex-col text-xs">
+    <div className="flex h-full flex-col text-xs text-gray-800">
       {/* 안내 + 정리 버튼 + 전체 선택 버튼 */}
       <div className="mb-2 flex items-center justify-between">
         <div className="text-[11px] text-gray-600">

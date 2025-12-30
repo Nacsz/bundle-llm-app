@@ -10,8 +10,6 @@ const rawBase =
   "";
 const API_BASE = rawBase.replace(/\/$/, "");
 
-// const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "").replace(/\/$/, "");
-
 export function getApiBase() {
   if (!API_BASE) {
     console.warn(
@@ -35,11 +33,27 @@ export function debugApiBase() {
   }
 }
 
-// 맨 위 타입들 근처에 추가
+// -------------------
+// 타입들
+// -------------------
+
 export type AutoGroupCandidate = {
   parent_name: string;
   child_bundle_ids: string[]; // UUID string[]
 };
+
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export interface ChatApiResponse {
+  answer: string;
+  memory_context: string;
+  used_memories: any[];
+}
+
+export type MemoryItem = import("./types").MemoryItem;
 
 // -------------------
 // 토큰 / OpenAI 설정 헬퍼
@@ -55,7 +69,7 @@ function getAccessToken(): string | null {
   }
 }
 
-// � 브라우저에 저장된 개인 OpenAI API Key
+// 브라우저에 저장된 개인 OpenAI API Key
 function getUserOpenAIKey(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -65,7 +79,7 @@ function getUserOpenAIKey(): string | null {
   }
 }
 
-// � 브라우저에 저장된 "교수 평가용 비밀번호"
+// 브라우저에 저장된 "교수 평가용 비밀번호"
 function getSharedApiPassword(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -102,6 +116,17 @@ export function setSharedApiPassword(pw: string | null) {
   }
 }
 
+// OpenAI 설정 전체 초기화 (로그아웃 등에 사용)
+export function clearOpenAIConfig() {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem("user_openai_key");
+    localStorage.removeItem("shared_api_password");
+  } catch {
+    // ignore
+  }
+}
+
 // -------------------
 // 공통 fetch 래퍼
 // -------------------
@@ -122,17 +147,20 @@ async function apiFetch(path: string, options?: RequestInit) {
     headers.set("Content-Type", "application/json");
   }
 
-  // � JWT 토큰이 있으면 Authorization 헤더 추가
+  // JWT 토큰이 있으면 Authorization 헤더 추가
   const token = getAccessToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  // � OpenAI 관련 헤더 처리
+  // OpenAI 관련 헤더 처리
   // 1순위: 개인 OpenAI API 키
   const userKey = getUserOpenAIKey();
   if (userKey) {
+    // 메모 요약용 엔드포인트 (x_openai_key)
     headers.set("X-OpenAI-Key", userKey);
+    // 번들 자동 정리용 엔드포인트 (x_openai_api_key, alias="X-OpenAI-Api-Key")
+    headers.set("X-OpenAI-Api-Key", userKey);
   } else {
     // 2순위: 교수 평가용 비밀번호 (공용 서버 키 사용 허용)
     const sharedPw = getSharedApiPassword();
@@ -156,23 +184,6 @@ async function apiFetch(path: string, options?: RequestInit) {
 }
 
 // -------------------
-// 타입들
-// -------------------
-
-export type ChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-};
-
-export interface ChatApiResponse {
-  answer: string;
-  memory_context: string;
-  used_memories: any[];
-}
-
-export type MemoryItem = import("./types").MemoryItem;
-
-// -------------------
 // 1) /chat 호출
 // -------------------
 
@@ -181,7 +192,7 @@ type SendChatPayload = {
   message: string;
   selected_bundle_ids: string[];
   history: ChatMessage[];
-  selected_memory_ids?: string[]; // ✅ 체크된 메모 id 배열
+  selected_memory_ids?: string[]; // 체크된 메모 id 배열
 };
 
 export async function sendChat(
@@ -246,13 +257,71 @@ type SaveMemoryPayload = {
   metadata?: Record<string, any>;
 };
 
+// 메모 제목을 깔끔하게 만드는 헬퍼
+// 메모 제목을 깔끔하게 만드는 헬퍼
+function buildMemoryTitle(
+  originalText: string,
+  rawTitle?: string,
+): string | undefined {
+  const trimmed = (rawTitle ?? "").trim();
+
+  // 1) 사용자가 직접 넣은 제목이 "짧고, 한 줄이고, 대화 로그처럼 안 보이면" 그대로 사용
+  const looksLikeConversation =
+    trimmed.includes("\n") ||
+    trimmed.includes("사용자:") ||
+    trimmed.includes("User:") ||
+    trimmed.includes("LLM:") ||
+    trimmed.includes("Assistant:");
+
+  if (trimmed && trimmed.length <= 40 && !looksLikeConversation) {
+    return trimmed;
+  }
+
+  // 2) 아니면 original_text에서 제목을 자동 생성
+  const text = (originalText || "").trim();
+  if (!text) {
+    // original_text 도 비어있으면, 일단 사용자가 넣은 거라도 반환
+    return trimmed || undefined;
+  }
+
+  // 첫 번째 유의미한 줄
+  const firstLine =
+    text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? "";
+
+  let line = firstLine;
+
+  // "사용자:", "LLM:" 같은 접두어 제거
+  const prefixes = ["사용자:", "User:", "유저:", "LLM:", "Assistant:", "답변:"];
+  for (const p of prefixes) {
+    if (line.startsWith(p)) {
+      line = line.slice(p.length).trim();
+      break;
+    }
+  }
+
+  if (!line) return trimmed || undefined;
+
+  const maxLen = 20;
+  return line.length > maxLen ? line.slice(0, maxLen) + "…" : line;
+}
+
+
 export async function saveMemoryToBundle(
   bundleId: string,
   payload: SaveMemoryPayload,
 ): Promise<MemoryItem> {
+  const finalPayload: SaveMemoryPayload = {
+    ...payload,
+    // 긴 제목/대화 전체가 넘어와도 여기서 한 번 정리
+    title: buildMemoryTitle(payload.original_text, payload.title),
+  };
+
   const res = await apiFetch(`/bundles/${bundleId}/memories`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(finalPayload),
   });
 
   return (await res.json()) as MemoryItem;

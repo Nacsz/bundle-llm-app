@@ -18,6 +18,7 @@ import {
   register,
   setAccessToken,
   clearAccessToken,
+  clearOpenAIConfig,
   fetchMe,
   setUserOpenAIKey,
   setSharedApiPassword,
@@ -198,6 +199,7 @@ export default function HomePage() {
 
   const handleLogout = () => {
     clearAccessToken();
+    clearOpenAIConfig();
     setCurrentUser(null);
     setBundles([]);
     setMessages([]);
@@ -461,18 +463,14 @@ export default function HomePage() {
       // ----- 자동 메모 저장 (현재 번들) -----
       if (autoSaveToBundle && currentBundleId) {
         try {
-          const titleBase = message.trim();
-          const title =
-            titleBase.length > 30
-              ? titleBase.slice(0, 30) + "…"
-              : titleBase || "자동 저장 메모";
+
 
           const autoText = `사용자: ${message}\n\nLLM: ${res.answer}`;
 
           const memory = await saveMemoryToBundle(currentBundleId, {
             user_id: currentUser.id,
             original_text: autoText,
-            title,
+            title: undefined,
             metadata: { from_ui: "auto_chat_save" },
           });
 
@@ -597,36 +595,43 @@ export default function HomePage() {
   // -----------------------------
   // 메모 저장(수동 패널)
   // -----------------------------
-  const handleSaveMemory = async (bundleId: string, title: string) => {
-    if (!currentUser) {
-      window.alert("먼저 로그인 해주세요.");
-      return;
-    }
+const handleSaveMemory = async (bundleId: string, title: string) => {
+  if (!currentUser) {
+    window.alert("먼저 로그인 해주세요.");
+    return;
+  }
 
-    if (!textToSave.trim()) {
-      window.alert("저장할 텍스트가 비어 있습니다.");
-      return;
-    }
+  if (!textToSave.trim()) {
+    window.alert("저장할 텍스트가 비어 있습니다.");
+    return;
+  }
 
-    try {
-      const memory = await saveMemoryToBundle(bundleId, {
-        user_id: currentUser.id,
-        original_text: textToSave,
-        title: title || undefined,
-        metadata: { from_ui: "manual_save_panel" },
-      });
+  // ✅ 제목 입력 정리 (최대 40자, 공백만 있으면 undefined)
+  const cleanTitle = title.trim();
+  const finalTitle =
+    cleanTitle.length > 0
+      ? cleanTitle.slice(0, 40)
+      : undefined;
 
-      setBundleMemories((prev) => ({
-        ...prev,
-        [bundleId]: [memory, ...(prev[bundleId] ?? [])],
-      }));
+  try {
+    const memory = await saveMemoryToBundle(bundleId, {
+      user_id: currentUser.id,
+      original_text: textToSave,
+      title: finalTitle,
+      metadata: { from_ui: "manual_save_panel" },
+    });
 
-      setTextToSave("");
-    } catch (err) {
-      console.error("saveMemoryToBundle failed", err);
-      window.alert("메모 저장 실패");
-    }
-  };
+    setBundleMemories((prev) => ({
+      ...prev,
+      [bundleId]: [memory, ...(prev[bundleId] ?? [])],
+    }));
+
+    setTextToSave("");
+  } catch (err) {
+    console.error("saveMemoryToBundle failed", err);
+    window.alert("메모 저장 실패");
+  }
+};
 
   // -----------------------------
   // 메모 편집/삭제
